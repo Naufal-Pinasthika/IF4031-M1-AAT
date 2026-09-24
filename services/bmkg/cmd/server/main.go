@@ -7,12 +7,17 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/bmkg/internal/handler"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/bmkg/internal/middleware"
 )
 
 func main()  {
 	// init chi router
 	r := chi.NewRouter()
 
+	// validate auth key & apply delay
+	r.Use(middleware.BMKGAuth)
+	r.Use(middleware.ApplyDelay)
+	
 	// define endpoints
 	r.Get("/health", handler.GetHealth)
 	r.Get("/seismic-events", handler.GetSesimicEvents)
