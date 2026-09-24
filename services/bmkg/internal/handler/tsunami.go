@@ -9,7 +9,7 @@ import (
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/bmkg/internal/model"
 )
 
-// GET /seismic-events?since=<timestamp>
+// GET /volcanic-reports?since=<timestamp>
 func GetTsunamiWarnings(w http.ResponseWriter, r* http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
