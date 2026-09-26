@@ -18,7 +18,7 @@ func GetSesimicEvents(w http.ResponseWriter, r* http.Request) {
 	
 	// assumptions: if null return error
 	if querySince == "" {
-		http.Error(w, `{"error":"invalid timestamp"}`, http.StatusBadRequest)
+		http.Error(w, `{"error":"missing query parameter"}`, http.StatusBadRequest)
 		return
 	}
 
