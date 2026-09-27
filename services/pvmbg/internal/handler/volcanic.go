@@ -8,7 +8,6 @@ import (
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/pvmbg/internal/data"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/pvmbg/internal/model"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/pvmbg/internal/state"
-	"github.com/pelletier/go-toml/query"
 )
 
 type VolcanicHandler struct {
@@ -55,5 +54,5 @@ func (v *VolcanicHandler) GetReports(w http.ResponseWriter, r *http.Request) {
 		result = append(result, copyReport)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewDecoder(w).Encode(result)
+	_ = json.NewEncoder(w).Encode(result)
 }

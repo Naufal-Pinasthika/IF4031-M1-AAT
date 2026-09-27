@@ -1,9 +1,9 @@
 package main
 
 import (
-	"go/token"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -14,6 +14,8 @@ import (
 )
 
 func main()  {
+	//init token
+	pvmbgToken := os.Getenv("PVMBG_TOKEN")
 	// init chi router
 	r := chi.NewRouter()
 
@@ -26,7 +28,7 @@ func main()  {
 	r.Get("/health", handler.GetHealth)
 
 	r.Route("/", func(r chi.Router) {
-		r.Use(middleware.PVMBGAuth(token))
+		r.Use(middleware.PVMBGAuth(pvmbgToken))
 		// admin enddpoint
 		r.Post("/admin/schema-version", adminHandler.ToggleSchemaVersion)
 		r.Post("/admin/outage", adminHandler.ToggleOutage)

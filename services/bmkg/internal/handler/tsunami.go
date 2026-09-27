@@ -28,14 +28,28 @@ func GetTsunamiWarnings(w http.ResponseWriter, r* http.Request) {
 		return
 	}
 
+	// SeismicEvent.EventID -> SeismicEvent.OccuredAt
+	eventOccuredAt := make(map[string]time.Time)
+
+	for _, seismicEvent := range data.SeismicEvents {
+		eventOccuredAt[seismicEvent.EventID] = seismicEvent.OccurredAt
+	}
+
 	result := make([]model.TsunamiWarning, 0)
 
-	for _, event := range data.TsunamiWarnings {
+	for _, warning := range data.TsunamiWarnings {
+		occuredAt, exist := eventOccuredAt[warning.RelatedEventID]
+		
 		// collect SesimicEvent data DURING and AFTER `since`
 		// append to result
-		if event.OccurredAt.After(dataSince) || event.OccurredAt.Equal(dataSince) {
-			result = append(result, event)
-		}	
+		if !exist {
+			continue
+		}
+
+		if occuredAt.Before(dataSince) {
+			continue
+		}
+		result = append(result, warning)
 	}
 
 	// convert to json

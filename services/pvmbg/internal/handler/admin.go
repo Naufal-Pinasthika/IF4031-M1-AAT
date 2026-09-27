@@ -11,26 +11,16 @@ type AdminHandler struct {
 	State *state.ServiceState
 }
 
-func (h *AdminHandler) ToggleSchemaVersion(
-	w http.ResponseWriter,
-	r *http.Request,
-) {
+func (h *AdminHandler) ToggleSchemaVersion(w http.ResponseWriter, r *http.Request) {
 	enabled := h.State.ToggleSchemaVersion()
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"schema_v2_enabled": enabled,
-	})
+	_ = json.NewEncoder(w).Encode(map[string]any{"schema_v2_enabled": enabled})
 }
 
-func (h *AdminHandler) ToggleOutage(
-	w http.ResponseWriter,
-	r *http.Request,
-) {
+func (h *AdminHandler) ToggleOutage(w http.ResponseWriter, r *http.Request) {
 	enabled := h.State.ToggleOutage()
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"outage_enabled": enabled,
-	})
+	_ = json.NewEncoder(w).Encode(map[string]any{"outage_enabled": enabled})
 }
