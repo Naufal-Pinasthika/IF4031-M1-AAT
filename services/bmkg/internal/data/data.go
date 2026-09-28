@@ -1,47 +1,91 @@
 package data
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/bmkg/internal/model"
-
 )
 
-// simple mockup data
-var SeismicEvents = []model.SeismicEvent{
-	{
-		EventID:          "EQ-001",
-		Magnitude:        6.2,
-		DepthKM:          12.5,
-		EpicenterLat:     -6.9147,
-		EpicenterLon:     107.6098,
-		RegionName:       "Jawa Barat",
-		OccurredAt:       time.Date(2026, 9, 24, 9, 30, 0, 0, time.UTC),
-		PotentialTsunami: false,
-	},
-	{
-		EventID:          "EQ-002",
-		Magnitude:        7.1,
-		DepthKM:          20.0,
-		EpicenterLat:     -8.2,
-		EpicenterLon:     110.5,
-		RegionName:       "Selatan Jawa",
-		OccurredAt:       time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC),
-		PotentialTsunami: true,
-	},
+// mock mbkg data generator
+var SeismicEvents = seedSeismicEvents()
+
+var TsunamiWarnings = seedTsunamiWarnings()
+
+func seedSeismicEvents() []model.SeismicEvent {
+	events := make([]model.SeismicEvent, 0, 20)
+
+	baseTime := time.Date(
+		2026,
+		9,
+		1,
+		0,
+		0,
+		0,
+		0,
+		time.UTC,
+	)
+
+	regions := []string{
+		"Jawa Barat",
+		"Jawa Tengah",
+		"Jawa Timur",
+		"Sumatera Barat",
+		"Sumatera Utara",
+		"Selatan Jawa",
+		"Bali",
+		"Nusa Tenggara Barat",
+		"Maluku",
+		"Papua Barat",
+	}
+
+	for i := 0; i < 20; i++ {
+		magnitude := 5.0 + float64(i%16)*0.15
+
+		events = append(events, model.SeismicEvent{
+			EventID:          fmt.Sprintf("EQ-%03d", i+1),
+			Magnitude:        magnitude,
+			DepthKM:          8.0 + float64(i%10)*2.5,
+			EpicenterLat:     -9.0 + float64(i)*0.25,
+			EpicenterLon:     105.0 + float64(i)*0.4,
+			RegionName:       regions[i%len(regions)],
+			OccurredAt:       baseTime.Add(time.Duration(i) * 12 * time.Hour),
+			PotentialTsunami: i%4 == 0,
+		})
+	}
+
+	return events
 }
 
-var TsunamiWarnings = []model.TsunamiWarning{
-	{
-		WarningID:      "TW-001",
-		RelatedEventID: "EQ-002",
-		ThreatLevel:    model.ThreatSiaga,
-		AffectedZones: []string{
-			"Pantai Selatan Jawa Barat",
-			"Pantai Selatan Jawa Tengah",
-		},
-		EstimatedArrival: time.Date(
-			2026, 9, 24, 10, 45, 0, 0, time.UTC,
-		),
-	},
+func seedTsunamiWarnings() []model.TsunamiWarning {
+	warnings := make([]model.TsunamiWarning, 0)
+
+	for _, event := range SeismicEvents {
+		if !event.PotentialTsunami {
+			continue
+		}
+
+		threatLevel := model.ThreatWaspada
+
+		if event.Magnitude >= 6.5 {
+			threatLevel = model.ThreatSiaga
+		}
+
+		if event.Magnitude >= 7.0 {
+			threatLevel = model.ThreatAwas
+		}
+
+		warnings = append(warnings, model.TsunamiWarning{
+			WarningID:      fmt.Sprintf("TW-%03d", len(warnings)+1),
+			RelatedEventID: event.EventID,
+			ThreatLevel:    threatLevel,
+			AffectedZones: []string{
+				event.RegionName + " bagian selatan",
+				event.RegionName + " wilayah pesisir",
+			},
+			EstimatedArrival: event.OccurredAt.Add(45 * time.Minute),
+		})
+	}
+
+	return warnings
 }

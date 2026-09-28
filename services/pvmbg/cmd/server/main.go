@@ -16,6 +16,9 @@ import (
 func main()  {
 	//init token
 	pvmbgToken := os.Getenv("PVMBG_TOKEN")
+	if pvmbgToken == "" {
+		log.Fatal("PVMG_TOKEN is not configured")
+	}
 	// init chi router
 	r := chi.NewRouter()
 
@@ -40,7 +43,7 @@ func main()  {
 
 	// listen to port 8082
 	log.Println("PVMBG server running at :8082")
-	err := http.ListenAndServe(":8081", r)
+	err := http.ListenAndServe(":8082", r)
 
 	if err != nil {
 		log.Fatal(err)
