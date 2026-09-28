@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/bmkg/internal/data"
-	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/bmkg/internal/model"
 )
 
 // GET /volcanic-reports?since=<timestamp>
@@ -28,30 +27,8 @@ func GetTsunamiWarnings(w http.ResponseWriter, r* http.Request) {
 		return
 	}
 
-	// SeismicEvent.EventID -> SeismicEvent.OccuredAt
-	eventOccuredAt := make(map[string]time.Time)
+	result := data.ListTsunamiWarnings(dataSince)
 
-	for _, seismicEvent := range data.SeismicEvents {
-		eventOccuredAt[seismicEvent.EventID] = seismicEvent.OccurredAt
-	}
-
-	result := make([]model.TsunamiWarning, 0)
-
-	for _, warning := range data.TsunamiWarnings {
-		occuredAt, exist := eventOccuredAt[warning.RelatedEventID]
-		
-		// collect SesimicEvent data DURING and AFTER `since`
-		// append to result
-		if !exist {
-			continue
-		}
-
-		if occuredAt.Before(dataSince) {
-			continue
-		}
-		result = append(result, warning)
-	}
-
-	// convert to json
-	json.NewEncoder(w).Encode(result)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
 }	

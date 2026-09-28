@@ -4,9 +4,6 @@ services:
       context: ./services/bmkg
     environment:
       BMKG_API_KEY: ${BMKG_API_KEY:?BMKG_API_KEY is required}
-      BMKG_DELAY_MIN_MS: ${BMKG_DELAY_MIN_MS:-50}
-      BMKG_DELAY_MAX_MS: ${BMKG_DELAY_MAX_MS:-150}
-      BMKG_EVENT_INTERVAL_MS: ${BMKG_EVENT_INTERVAL_MS:-10000}
     ports:
       - "8081:8081"
     restart: unless-stopped

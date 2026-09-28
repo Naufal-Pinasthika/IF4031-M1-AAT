@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"os"
 )
@@ -18,7 +19,7 @@ func BMKGAuth(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"missing API key"}`, http.StatusUnauthorized)
 			return 
 		}
-		if providedKey != expectedKey {
+		if subtle.ConstantTimeCompare([]byte(providedKey), []byte(expectedKey)) != 1 {
 			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
 			return 
 		}

@@ -1,27 +1,58 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/pvmbg/internal/data"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/pvmbg/internal/handler"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/pvmbg/internal/middleware"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/pvmbg/internal/state"
 )
 
+func requiredDurationMS(name string) time.Duration {
+	raw := os.Getenv(name)
+
+	if raw == "" {
+		log.Fatalf("%s is not configured", name)
+	}
+
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms <= 0 {
+		log.Fatalf("%s must be a positive integer in milliseconds", name)
+	}
+
+	return time.Duration(ms) * time.Millisecond
+}
+
 func main()  {
 	//init token
 	pvmbgToken := os.Getenv("PVMBG_TOKEN")
 	if pvmbgToken == "" {
-		log.Fatal("PVMG_TOKEN is not configured")
+		log.Fatal("PVMBG_TOKEN is not configured")
 	}
+	minDelay := requiredDurationMS("PVMBG_DELAY_MIN_MS")
+	maxDelay := requiredDurationMS("PVMBG_DELAY_MAX_MS")
+	eventInterval := requiredDurationMS("PVMBG_EVENT_INTERVAL_MS")
+
+	if minDelay > maxDelay {
+		log.Fatal("PVMBG_DELAY_MIN_MS cannot be greater than PVMBG_DELAY_MAX_MS")
+	}
+	go data.StartGenerator(context.Background(),eventInterval)
+	
 	// init chi router
 	r := chi.NewRouter()
 
+	// init logger
+	r.Use(middleware.RequestLogger("pvmbg"))
+
+	// init state
 	serviceState := state.NewServiceState()
 
 	volcanicHandler := &handler.VolcanicHandler{State: serviceState}
