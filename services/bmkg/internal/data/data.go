@@ -1,15 +1,18 @@
 package data
 
 import (
+	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/bmkg/internal/model"
 )
 
 // mock mbkg data generator
-var SeismicEvents = seedSeismicEvents()
+var dataMu sync.RWMutex
 
+var SeismicEvents = seedSeismicEvents()
 var TsunamiWarnings = seedTsunamiWarnings()
 
 func seedSeismicEvents() []model.SeismicEvent {
@@ -88,4 +91,109 @@ func seedTsunamiWarnings() []model.TsunamiWarning {
 	}
 
 	return warnings
+}
+
+func ListSeismicEvents(since time.Time) []model.SeismicEvent {
+	dataMu.RLock()
+	defer dataMu.RUnlock()
+
+	result := make([]model.SeismicEvent, 0)
+
+	for _, event := range SeismicEvents {
+		if !event.OccurredAt.Before(since) {
+			result = append(result, event)
+		}
+	}
+
+	return result
+}
+
+func ListTsunamiWarnings(since time.Time) []model.TsunamiWarning {
+	dataMu.RLock()
+	defer dataMu.RUnlock()
+
+	eventOccurredAt := make(map[string]time.Time, len(SeismicEvents))
+
+	for _, event := range SeismicEvents {
+		eventOccurredAt[event.EventID] = event.OccurredAt
+	}
+
+	result := make([]model.TsunamiWarning, 0)
+
+	for _, warning := range TsunamiWarnings {
+		occurredAt, exists := eventOccurredAt[warning.RelatedEventID]
+		if !exists || occurredAt.Before(since) {
+			continue
+		}
+
+		warning.AffectedZones = append([]string(nil), warning.AffectedZones...)
+		result = append(result, warning)
+	}
+
+	return result
+}
+
+func StartGenerator(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case now := <-ticker.C:
+			appendGeneratedEvent(now.UTC())
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func appendGeneratedEvent(now time.Time) {
+	dataMu.Lock()
+	defer dataMu.Unlock()
+
+	index := len(SeismicEvents) + 1
+	eventID := fmt.Sprintf("EQ-%03d", index)
+
+	event := model.SeismicEvent{
+		EventID:          eventID,
+		Magnitude:        5.0 + float64(index%16)*0.15,
+		DepthKM:          10.0 + float64(index%8),
+		EpicenterLat:     -6.2,
+		EpicenterLon:     106.8,
+		RegionName:       "Demo Region",
+		OccurredAt:       now,
+		PotentialTsunami: index%4 == 0,
+	}
+
+	SeismicEvents = append(SeismicEvents, event)
+
+	if !event.PotentialTsunami {
+		return
+	}
+
+	threatLevel := model.ThreatWaspada
+
+	if event.Magnitude >= 6.5 {
+		threatLevel = model.ThreatSiaga
+	}
+
+	if event.Magnitude >= 7.0 {
+		threatLevel = model.ThreatAwas
+	}
+
+	TsunamiWarnings = append(TsunamiWarnings, model.TsunamiWarning{
+		WarningID:      fmt.Sprintf("TW-%03d", len(TsunamiWarnings)+1),
+		RelatedEventID: event.EventID,
+		ThreatLevel:    threatLevel,
+		AffectedZones: []string{
+			event.RegionName + " bagian selatan",
+			event.RegionName + " wilayah pesisir",
+		},
+		EstimatedArrival: now.Add(45 * time.Minute),
+	})
 }

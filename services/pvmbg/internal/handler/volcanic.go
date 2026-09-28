@@ -38,11 +38,7 @@ func (v *VolcanicHandler) GetReports(w http.ResponseWriter, r *http.Request) {
 
 	result := make([]model.VolcanicReport, 0)
 
-	for _, report := range data.VolcanicReports {
-		if report.ReportedAt.Before(since) {
-			continue
-		}
-
+	for _, report := range data.ListVolcanicReports(since) {
 		copyReport := report
 
 		if v.State.IsSchemaV2() {
