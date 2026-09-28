@@ -19,7 +19,7 @@ func (v *VolcanicHandler) GetReports(w http.ResponseWriter, r *http.Request) {
 	if v.State.IsOutage() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"error":"PVMG unavailable"}`))
+		_, _ = w.Write([]byte(`{"error":"PVMBG unavailable"}`))
 		return
 	}
 

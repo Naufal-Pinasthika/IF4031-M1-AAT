@@ -1,0 +1,34 @@
+services:
+  bmkg:
+    build:
+      context: ./services/bmkg
+    environment:
+      BMKG_API_KEY: ${BMKG_API_KEY:?BMKG_API_KEY is required}
+      BMKG_DELAY_MIN_MS: ${BMKG_DELAY_MIN_MS:-50}
+      BMKG_DELAY_MAX_MS: ${BMKG_DELAY_MAX_MS:-150}
+      BMKG_EVENT_INTERVAL_MS: ${BMKG_EVENT_INTERVAL_MS:-10000}
+    ports:
+      - "8081:8081"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  pvmbg:
+    build:
+      context: ./services/pvmbg
+    environment:
+      PVMBG_TOKEN: ${PVMBG_TOKEN:?PVMBG_TOKEN is required}
+      PVMBG_DELAY_MIN_MS: ${PVMBG_DELAY_MIN_MS:-500}
+      PVMBG_DELAY_MAX_MS: ${PVMBG_DELAY_MAX_MS:-3000}
+      PVMBG_EVENT_INTERVAL_MS: ${PVMBG_EVENT_INTERVAL_MS:-10000}
+    ports:
+      - "8082:8082"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
