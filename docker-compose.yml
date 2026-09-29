@@ -29,3 +29,29 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
+
+  aggregator:
+    build:
+      context: ./services/aggregator
+    environment:
+      BMKG_API_KEY: ${BMKG_API_KEY:?BMKG_API_KEY is required}
+      PVMBG_TOKEN: ${PVMBG_TOKEN:?PVMBG_TOKEN is required}
+      AGGREGATOR_LISTEN_ADDRESS: :8083
+      BMKG_URL: ${BMKG_URL:-http://bmkg:8081}
+      PVMBG_URL: ${BMKG_URL:-http://pvmbg:8082}
+      AGGREGATOR_POLL_INTERVAL_MS: ${AGGREGATOR_POLL_INTERVAL_MS:-5000}
+      AGGREGATOR_HTTP_TIMEOUT_MS: ${AGGREGATOR_HTTP_TIMEOUT_MS:-4000}
+      AGGREGATOR_START_SINCE: ${AGGREGATOR_START_SINCE:-1970-01-01T00:00:00Z}
+    ports:
+      - "8083:8083"
+    depends_on:
+      bmkg:
+        condition: service_healthy
+      pvmbg:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8083/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
