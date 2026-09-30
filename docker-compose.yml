@@ -1,4 +1,23 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: aggregator
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD is required}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:-aggregator_app}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD is required}
+    volumes:
+      - aggregator-postgres-data:/var/lib/postgresql/data
+      - ./services/database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d aggregator"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - database
+
   bmkg:
     build:
       context: ./services/bmkg
@@ -36,9 +55,10 @@ services:
     environment:
       BMKG_API_KEY: ${BMKG_API_KEY:?BMKG_API_KEY is required}
       PVMBG_TOKEN: ${PVMBG_TOKEN:?PVMBG_TOKEN is required}
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       AGGREGATOR_LISTEN_ADDRESS: :8083
       BMKG_URL: ${BMKG_URL:-http://bmkg:8081}
-      PVMBG_URL: ${BMKG_URL:-http://pvmbg:8082}
+      PVMBG_URL: ${PVMBG_URL:-http://pvmbg:8082}
       AGGREGATOR_POLL_INTERVAL_MS: ${AGGREGATOR_POLL_INTERVAL_MS:-5000}
       AGGREGATOR_HTTP_TIMEOUT_MS: ${AGGREGATOR_HTTP_TIMEOUT_MS:-4000}
       AGGREGATOR_START_SINCE: ${AGGREGATOR_START_SINCE:-1970-01-01T00:00:00Z}
@@ -49,9 +69,21 @@ services:
         condition: service_healthy
       pvmbg:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8083/health"]
       interval: 10s
       timeout: 3s
       retries: 3
+    networks:
+      - default
+      - database
+
+networks:
+  database:
+    internal: true
+
+volumes:
+  aggregator-postgres-data:
