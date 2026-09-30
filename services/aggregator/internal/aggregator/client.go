@@ -9,6 +9,23 @@ import (
 	"time"
 )
 
+type ThreatLevel string
+
+const (
+	ThreatWaspada ThreatLevel = "Waspada"
+	ThreatSiaga   ThreatLevel = "Siaga"
+	ThreatAwas    ThreatLevel = "Awas"
+)
+
+type AlertLevel string
+
+const (
+	AlertNormal  AlertLevel = "Normal"
+	AlertWaspada AlertLevel = "Waspada"
+	AlertSiaga   AlertLevel = "Siaga"
+	AlertAwas    AlertLevel = "Awas"
+)
+
 type SeismicEvent struct {
 	EventID          string                     `json:"event_id"`
 	Magnitude        float64                    `json:"magnitude"`
@@ -24,7 +41,7 @@ type SeismicEvent struct {
 type TsunamiWarning struct {
 	WarningID        string                     `json:"warning_id"`
 	RelatedEventID   string                     `json:"related_event_id"`
-	ThreatLevel      string                     `json:"threat_level"`
+	ThreatLevel      ThreatLevel                `json:"threat_level"`
 	AffectedZones    []string                   `json:"affected_zones"`
 	EstimatedArrival time.Time                  `json:"estimated_arrival"`
 	Extra            map[string]json.RawMessage `json:"-"`
@@ -33,7 +50,7 @@ type TsunamiWarning struct {
 type VolcanicReport struct {
 	ReportID         string                     `json:"report_id"`
 	VolcanoID        string                     `json:"volcano_id"`
-	AlertLevel       string                     `json:"alert_level"`
+	AlertLevel       AlertLevel                 `json:"alert_level"`
 	EruptionCount24H int64                      `json:"eruption_count_24h"`
 	AshColumnHeightM float64                    `json:"ash_column_height_m"`
 	ReportedAt       time.Time                  `json:"reported_at"`
@@ -109,7 +126,9 @@ func fetchJSON[T any](c *Client, ctx context.Context, endpoint string, since tim
 }
 
 func (event *SeismicEvent) UnmarshalJSON(data []byte) error {
-	var decoded SeismicEvent
+	type plainSeismicEvent SeismicEvent
+
+	var decoded plainSeismicEvent
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
@@ -124,7 +143,9 @@ func (event *SeismicEvent) UnmarshalJSON(data []byte) error {
 }
 
 func (warning *TsunamiWarning) UnmarshalJSON(data []byte) error {
-	var decoded TsunamiWarning
+	type plainTsunamiWarning TsunamiWarning
+
+	var decoded plainTsunamiWarning
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
@@ -137,7 +158,9 @@ func (warning *TsunamiWarning) UnmarshalJSON(data []byte) error {
 }
 
 func (report *VolcanicReport) UnmarshalJSON(data []byte) error {
-	var decoded VolcanicReport
+	type plainVolcanicReport VolcanicReport
+
+	var decoded plainVolcanicReport
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
