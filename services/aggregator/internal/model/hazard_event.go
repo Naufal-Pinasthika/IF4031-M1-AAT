@@ -2,34 +2,34 @@ package model
 
 import "time"
 
-type SourceEnum string
+type HazardSource string
 
 const (
-	BMKG  SourceEnum = "BMKG"
-	PVMBG SourceEnum = "PVMBG"
+	SourceBMKG  HazardSource = "BMKG"
+	SourcePVMBG HazardSource = "PVMBG"
 )
 
-type HazardEnum string
+type HazardType string
 
 const (
-	SEISMIC  HazardEnum = "SEISMIC"
-	VOLCANIC HazardEnum = "VOLCANIC"
+	HazardTypeSEISMIC  HazardType = "SEISMIC"
+	HazardTypeVOLCANIC HazardType = "VOLCANIC"
 )
 
 type SeverityLevel string
 
 const (
-	NORMAL  SeverityLevel = "NORMAL"
-	WASPADA SeverityLevel = "WASPADA"
-	SIAGA   SeverityLevel = "SIAGA"
-	AWAS    SeverityLevel = "AWAS"
+	SeverityNORMAL  SeverityLevel = "NORMAL"
+	SeverityWASPADA SeverityLevel = "WASPADA"
+	SeveritySIAGA   SeverityLevel = "SIAGA"
+	SeverityAWAS    SeverityLevel = "AWAS"
 )
 
 type HazardEvent struct {
 	HazardID    string         `json:"hazard_id"`
-	Source      SourceEnum     `json:"source"`
+	Source      HazardSource   `json:"source"`
 	SourceRefID string         `json:"source_ref_id"`
-	HazardType  HazardEnum     `json:"hazard_type"`
+	HazardType  HazardType     `json:"hazard_type"`
 	Severity    SeverityLevel  `json:"severity"`
 	AreaName    string         `json:"area_name"`
 	Latitude    float64        `json:"latitude"`

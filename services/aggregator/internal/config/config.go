@@ -9,6 +9,7 @@ import (
 
 type Config struct {
 	ListenAddress   string
+	DatabaseURL     string
 	BMKGURL         string
 	BMKGAPIKey      string
 	PVMBGURL        string
@@ -38,6 +39,7 @@ func Load() (Config, error) {
 
 	return Config{
 		ListenAddress:   envOrDefault("AGGREGATOR_LISTEN_ADDRESS", ":8080"),
+		DatabaseURL:     envOrDefault("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/aggregator?sslmode=disable"),
 		BMKGURL:         envOrDefault("BMKG_URL", "http://localhost:8081"),
 		BMKGAPIKey:      os.Getenv("BMKG_API_KEY"),
 		PVMBGURL:        envOrDefault("PVMBG_URL", "http://localhost:8082"),
