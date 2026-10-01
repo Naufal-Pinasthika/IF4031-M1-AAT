@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/broker"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/config"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
 )
@@ -15,15 +16,20 @@ type EventStore interface {
 	Upsert(ctx context.Context, event *model.HazardEvent) error
 }
 
-type Aggregator struct {
-	poller *Poller
-	store  EventStore
-	config config.Config
-	logger *slog.Logger
+type EventPublisher interface {
+	Publish(ctx context.Context, envelope broker.EventEnvelope) error
 }
 
-func NewAggregator(poller *Poller, store EventStore, cfg config.Config, logger *slog.Logger) *Aggregator {
-	return &Aggregator{poller: poller, store: store, config: cfg, logger: logger}
+type Aggregator struct {
+	poller    *Poller
+	store     EventStore
+	publisher EventPublisher
+	config    config.Config
+	logger    *slog.Logger
+}
+
+func NewAggregator(poller *Poller, store EventStore, publisher EventPublisher, cfg config.Config, logger *slog.Logger) *Aggregator {
+	return &Aggregator{poller: poller, store: store, publisher: publisher, config: cfg, logger: logger}
 }
 
 func (a *Aggregator) Run(ctx context.Context) {
@@ -99,6 +105,9 @@ func (a *Aggregator) processBMKG(ctx context.Context, batch BMKGBatch) error {
 		if err := a.store.Upsert(ctx, &hazard); err != nil {
 			return err
 		}
+		if err := a.publish(ctx, hazard, batch.CorrelationID); err != nil {
+			return err
+		}
 	}
 
 	a.logger.Info("bmkg_batch_received", "events", len(batch.Events), "warnings", len(batch.Warnings), "correlation_id", batch.CorrelationID)
@@ -115,10 +124,28 @@ func (a *Aggregator) processPVMBG(ctx context.Context, batch PVMBGBatch) error {
 		if err := a.store.Upsert(ctx, &hazard); err != nil {
 			return err
 		}
+		if err := a.publish(ctx, hazard, batch.CorrelationID); err != nil {
+			return err
+		}
 	}
 
 	a.logger.Info("pvmbg_batch_received", "reports", len(batch.Reports), "correlation_id", batch.CorrelationID)
 	return nil
+}
+
+func (a *Aggregator) publish(ctx context.Context, event model.HazardEvent, correlationID string) error {
+	if a.publisher == nil {
+		return fmt.Errorf("event publisher is not configured")
+	}
+
+	envelope := broker.EventEnvelope{
+		EventType:     "hazard.event.upserted",
+		SchemaVersion: 1,
+		CorrelationID: correlationID,
+		PublishedAt:   time.Now().UTC(),
+		Data:          event,
+	}
+	return a.publisher.Publish(ctx, envelope)
 }
 
 func mapSeismic(event SeismicEvent, warning *TsunamiWarning) (model.HazardEvent, error) {
