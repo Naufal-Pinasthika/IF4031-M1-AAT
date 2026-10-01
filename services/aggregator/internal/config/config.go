@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 type Config struct {
 	ListenAddress   string
 	DatabaseURL     string
+	KafkaBrokers    []string
+	KafkaTopic      string
 	BMKGURL         string
 	BMKGAPIKey      string
 	PVMBGURL        string
@@ -40,6 +43,8 @@ func Load() (Config, error) {
 	return Config{
 		ListenAddress:   envOrDefault("AGGREGATOR_LISTEN_ADDRESS", ":8080"),
 		DatabaseURL:     envOrDefault("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/aggregator?sslmode=disable"),
+		KafkaBrokers:    splitCommaSeparated(os.Getenv("KAFKA_BROKERS"), "localhost:9092"),
+		KafkaTopic:      envOrDefault("KAFKA_TOPIC", "hazard.events.v1"),
 		BMKGURL:         envOrDefault("BMKG_URL", "http://localhost:8081"),
 		BMKGAPIKey:      os.Getenv("BMKG_API_KEY"),
 		PVMBGURL:        envOrDefault("PVMBG_URL", "http://localhost:8082"),
@@ -68,4 +73,19 @@ func envOrDefault(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func splitCommaSeparated(raw, fallback string) []string {
+	if raw == "" {
+		raw = fallback
+	}
+
+	values := make([]string, 0)
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
 }
