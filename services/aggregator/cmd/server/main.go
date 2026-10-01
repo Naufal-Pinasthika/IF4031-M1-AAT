@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/aggregator"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/broker"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/config"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/handler"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/status"
@@ -32,8 +33,14 @@ func main() {
 		log.Fatal(err)
 	}
 	defer eventStore.Close()
+
+	publisher, err := broker.NewKafkaPublisher(cfg.KafkaBrokers, cfg.KafkaTopic)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer publisher.Close()
 	tracker := status.NewTracker()
-	service := aggregator.NewAggregator(poller, eventStore, cfg, logger, tracker)
+	service := aggregator.NewAggregator(poller, eventStore, publisher, cfg, logger, tracker)
 	apiHandler := handler.New(eventStore, tracker)
 	limiter := handler.NewLimiter(cfg.MaxInFlight)
 
