@@ -62,6 +62,7 @@ services:
       PVMBG_URL: ${PVMBG_URL:-http://pvmbg:8082}
       AGGREGATOR_POLL_INTERVAL_MS: ${AGGREGATOR_POLL_INTERVAL_MS:-5000}
       AGGREGATOR_HTTP_TIMEOUT_MS: ${AGGREGATOR_HTTP_TIMEOUT_MS:-4000}
+      AGGREGATOR_MAX_IN_FLIGHT: ${AGGREGATOR_MAX_IN_FLIGHT:-64}
       AGGREGATOR_START_SINCE: ${AGGREGATOR_START_SINCE:-1970-01-01T00:00:00Z}
     ports:
       - "8083:8083"
@@ -81,6 +82,26 @@ services:
     networks:
       - default
       - database
+
+  client-api:
+    build:
+      context: ./services/client-api
+    environment:
+      AGGREGATOR_URL: http://aggregator:8083
+      AGGREGATOR_API_KEY: ${AGGREGATOR_API_KEY:?AGGREGATOR_API_KEY is required}
+      CLIENT_API_KEY: ${CLIENT_API_KEY:?CLIENT_API_KEY is required}
+      CLIENT_API_MAX_IN_FLIGHT: ${CLIENT_API_MAX_IN_FLIGHT:-64}
+    ports:
+      - "8080:8080"
+    depends_on:
+      aggregator:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
 networks:
   database:

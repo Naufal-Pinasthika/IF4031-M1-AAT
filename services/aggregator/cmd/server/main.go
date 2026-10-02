@@ -13,6 +13,7 @@ import (
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/aggregator"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/config"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/handler"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/status"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/store"
 )
 
@@ -31,8 +32,10 @@ func main() {
 		log.Fatal(err)
 	}
 	defer eventStore.Close()
-	service := aggregator.NewAggregator(poller, eventStore, cfg, logger)
-	apiHandler := handler.New(eventStore, cfg)
+	tracker := status.NewTracker()
+	service := aggregator.NewAggregator(poller, eventStore, cfg, logger, tracker)
+	apiHandler := handler.New(eventStore, tracker)
+	limiter := handler.NewLimiter(cfg.MaxInFlight)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -42,9 +45,9 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", handler.GetHealth)
-	mux.HandleFunc("GET /internal/events", handler.AggregatorAuth(apiHandler.GetEvents))
-	mux.HandleFunc("GET /internal/events/{id}", handler.AggregatorAuth(apiHandler.GetEventByID))
-	mux.HandleFunc("GET /internal/source-status", handler.AggregatorAuth(apiHandler.GetSourceStatus))
+	mux.HandleFunc("GET /internal/events", handler.AggregatorAuth(limiter.Wrap(apiHandler.GetEvents)))
+	mux.HandleFunc("GET /internal/events/{id}", handler.AggregatorAuth(limiter.Wrap(apiHandler.GetEventByID)))
+	mux.HandleFunc("GET /internal/source-status", handler.AggregatorAuth(limiter.Wrap(apiHandler.GetSourceStatus)))
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
