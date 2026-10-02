@@ -16,6 +16,7 @@ type Config struct {
 	PVMBGToken      string
 	PollingInterval time.Duration
 	HTTPTimeout     time.Duration
+	MaxInFlight     int
 	StartSince      time.Time
 }
 
@@ -25,6 +26,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	httpTimeout, err := durationFromEnv("AGGREGATOR_HTTP_TIMEOUT_MS", 4000)
+	if err != nil {
+		return Config{}, err
+	}
+	maxInFlight, err := positiveIntFromEnv("AGGREGATOR_MAX_IN_FLIGHT", 64)
 	if err != nil {
 		return Config{}, err
 	}
@@ -46,6 +51,7 @@ func Load() (Config, error) {
 		PVMBGToken:      os.Getenv("PVMBG_TOKEN"),
 		PollingInterval: pollingInterval,
 		HTTPTimeout:     httpTimeout,
+		MaxInFlight:     maxInFlight,
 		StartSince:      startSince,
 	}, nil
 }
@@ -61,6 +67,18 @@ func durationFromEnv(name string, defaultMS int) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be a positive integer in milliseconds", name)
 	}
 	return time.Duration(value) * time.Millisecond, nil
+}
+
+func positiveIntFromEnv(name string, fallback int) (int, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return value, nil
 }
 
 func envOrDefault(name, fallback string) string {
