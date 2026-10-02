@@ -9,6 +9,7 @@ import (
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/config"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/status"
 )
 
 type EventStore interface {
@@ -20,10 +21,11 @@ type Aggregator struct {
 	store  EventStore
 	config config.Config
 	logger *slog.Logger
+	status *status.Tracker
 }
 
-func NewAggregator(poller *Poller, store EventStore, cfg config.Config, logger *slog.Logger) *Aggregator {
-	return &Aggregator{poller: poller, store: store, config: cfg, logger: logger}
+func NewAggregator(poller *Poller, store EventStore, cfg config.Config, logger *slog.Logger, tracker *status.Tracker) *Aggregator {
+	return &Aggregator{poller: poller, store: store, config: cfg, logger: logger, status: tracker}
 }
 
 func (a *Aggregator) Run(ctx context.Context) {
@@ -40,13 +42,20 @@ func (a *Aggregator) runBMKG(ctx context.Context) {
 	for {
 		batch, err := a.poller.PollBMKG(ctx, since)
 		if err == nil {
-			if err := a.processBMKG(ctx, batch); err == nil {
+			err = a.processBMKG(ctx, batch)
+			if err == nil {
 				for _, event := range batch.Events {
 					if event.OccurredAt.After(since) {
 						since = event.OccurredAt
 					}
 				}
 			}
+		}
+		// mark source after data saved to store
+		if err == nil {
+			a.status.Success("BMKG", time.Now())
+		} else if ctx.Err() == nil {
+			a.status.Failure("BMKG", time.Now())
 		}
 
 		select {
@@ -65,13 +74,20 @@ func (a *Aggregator) runPVMBG(ctx context.Context) {
 	for {
 		batch, err := a.poller.PollPVMBG(ctx, since)
 		if err == nil {
-			if err := a.processPVMBG(ctx, batch); err == nil {
+			err = a.processPVMBG(ctx, batch)
+			if err == nil {
 				for _, report := range batch.Reports {
 					if report.ReportedAt.After(since) {
 						since = report.ReportedAt
 					}
 				}
 			}
+		}
+		// mark source after data saved to store
+		if err == nil {
+			a.status.Success("PVMBG", time.Now())
+		} else if ctx.Err() == nil {
+			a.status.Failure("PVMBG", time.Now())
 		}
 
 		select {

@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/config"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/status"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/store"
 )
 
@@ -18,19 +18,12 @@ type EventReader interface {
 }
 
 type Handler struct {
-	reader   EventReader
-	bmkgURL  string
-	pvmbgURL string
-	client   *http.Client
+	reader  EventReader
+	tracker *status.Tracker
 }
 
-func New(reader EventReader, cfg config.Config) *Handler {
-	return &Handler{
-		reader:   reader,
-		bmkgURL:  cfg.BMKGURL,
-		pvmbgURL: cfg.PVMBGURL,
-		client:   &http.Client{Timeout: 2 * time.Second},
-	}
+func New(reader EventReader, tracker *status.Tracker) *Handler {
+	return &Handler{reader: reader, tracker: tracker}
 }
 
 func GetHealth(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +74,10 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load hazard events")
 		return
 	}
-	writeJSON(w, http.StatusOK, events)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events":  events,
+		"sources": h.sourceStatuses(filter.Source),
+	})
 }
 
 func (h *Handler) GetEventByID(w http.ResponseWriter, r *http.Request) {
@@ -94,35 +90,25 @@ func (h *Handler) GetEventByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "hazard event not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, event)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"event":         event,
+		"source_status": h.tracker.Snapshot(string(event.Source)),
+	})
 }
 
 func (h *Handler) GetSourceStatus(w http.ResponseWriter, r *http.Request) {
-	status := map[string]sourceStatus{
-		"BMKG":  h.checkSource(r.Context(), h.bmkgURL),
-		"PVMBG": h.checkSource(r.Context(), h.pvmbgURL),
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"sources": status})
+	writeJSON(w, http.StatusOK, map[string]any{"sources": h.sourceStatuses("")})
 }
 
-type sourceStatus struct {
-	Status string `json:"status"`
-}
-
-func (h *Handler) checkSource(ctx context.Context, baseURL string) sourceStatus {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/health", nil)
-	if err != nil {
-		return sourceStatus{Status: "DOWN"}
+func (h *Handler) sourceStatuses(source string) map[string]status.SourceStatus {
+	result := make(map[string]status.SourceStatus)
+	if source == "" || source == "BMKG" {
+		result["BMKG"] = h.tracker.Snapshot("BMKG")
 	}
-	response, err := h.client.Do(request)
-	if err != nil {
-		return sourceStatus{Status: "DOWN"}
+	if source == "" || source == "PVMBG" {
+		result["PVMBG"] = h.tracker.Snapshot("PVMBG")
 	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return sourceStatus{Status: "DOWN"}
-	}
-	return sourceStatus{Status: "UP"}
+	return result
 }
 
 func parseTime(value string) (*time.Time, error) {

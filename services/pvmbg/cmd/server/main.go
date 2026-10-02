@@ -31,7 +31,7 @@ func requiredDurationMS(name string) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
-func main()  {
+func main() {
 	//init token
 	pvmbgToken := os.Getenv("PVMBG_TOKEN")
 	if pvmbgToken == "" {
@@ -44,8 +44,8 @@ func main()  {
 	if minDelay > maxDelay {
 		log.Fatal("PVMBG_DELAY_MIN_MS cannot be greater than PVMBG_DELAY_MAX_MS")
 	}
-	go data.StartGenerator(context.Background(),eventInterval)
-	
+	go data.StartGenerator(context.Background(), eventInterval)
+
 	// init chi router
 	r := chi.NewRouter()
 
@@ -67,10 +67,9 @@ func main()  {
 		r.Post("/admin/schema-version", adminHandler.ToggleSchemaVersion)
 		r.Post("/admin/outage", adminHandler.ToggleOutage)
 
-		r.With(middleware.SimulatedDelay(500*time.Millisecond, 3*time.Second)).
-		Get("/volcanic-reports", volcanicHandler.GetReports)
+		r.With(middleware.SimulatedDelay(serviceState, minDelay, maxDelay)).
+			Get("/volcanic-reports", volcanicHandler.GetReports)
 	})
-
 
 	// listen to port 8082
 	log.Println("PVMBG server running at :8082")
@@ -79,6 +78,5 @@ func main()  {
 	if err != nil {
 		log.Fatal(err)
 	}
-
 
 }
