@@ -34,7 +34,7 @@ type HazardEvent struct {
 	AreaName    string         `json:"area_name"`
 	Latitude    float64        `json:"latitude"`
 	Longitude   float64        `json:"longitude"`
-	OccuredAt   time.Time      `json:"occured_at"`
+	OccuredAt   time.Time      `json:"occurred_at"`
 	IngestedAt  time.Time      `json:"ingested_at"`
 	Attributes  map[string]any `json:"attributes"`
 }
