@@ -48,6 +48,7 @@ func (a *Aggregator) runBMKG(ctx context.Context) {
 	for {
 		batch, err := a.poller.PollBMKG(ctx, since)
 		if err == nil {
+			batch.Events = seismicEventsAfter(batch.Events, since)
 			err = a.processBMKG(ctx, batch)
 			if err == nil {
 				for _, event := range batch.Events {
@@ -80,6 +81,7 @@ func (a *Aggregator) runPVMBG(ctx context.Context) {
 	for {
 		batch, err := a.poller.PollPVMBG(ctx, since)
 		if err == nil {
+			batch.Reports = volcanicReportsAfter(batch.Reports, since)
 			err = a.processPVMBG(ctx, batch)
 			if err == nil {
 				for _, report := range batch.Reports {
@@ -102,6 +104,26 @@ func (a *Aggregator) runPVMBG(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func seismicEventsAfter(events []SeismicEvent, since time.Time) []SeismicEvent {
+	filtered := make([]SeismicEvent, 0, len(events))
+	for _, event := range events {
+		if event.OccurredAt.After(since) {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
+}
+
+func volcanicReportsAfter(reports []VolcanicReport, since time.Time) []VolcanicReport {
+	filtered := make([]VolcanicReport, 0, len(reports))
+	for _, report := range reports {
+		if report.ReportedAt.After(since) {
+			filtered = append(filtered, report)
+		}
+	}
+	return filtered
 }
 
 func (a *Aggregator) processBMKG(ctx context.Context, batch BMKGBatch) error {
@@ -161,7 +183,15 @@ func (a *Aggregator) publish(ctx context.Context, event model.HazardEvent, corre
 		PublishedAt:   time.Now().UTC(),
 		Data:          event,
 	}
-	return a.publisher.Publish(ctx, envelope)
+	startedAt := time.Now()
+	err := a.publisher.Publish(ctx, envelope)
+	latency := time.Since(startedAt).Milliseconds()
+	if err != nil {
+		a.logger.Error("hazard_event_publish_failed", "hazard_id", event.HazardID, "correlation_id", correlationID, "latency_ms", latency, "error", err)
+		return err
+	}
+	a.logger.Info("hazard_event_published", "hazard_id", event.HazardID, "correlation_id", correlationID, "latency_ms", latency)
+	return nil
 }
 
 func mapSeismic(event SeismicEvent, warning *TsunamiWarning) (model.HazardEvent, error) {
