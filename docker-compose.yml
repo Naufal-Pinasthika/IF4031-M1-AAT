@@ -18,6 +18,23 @@ services:
     networks:
       - database
 
+  auth-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: auth
+      POSTGRES_USER: auth_app
+      POSTGRES_PASSWORD: ${AUTH_POSTGRES_PASSWORD:?AUTH_POSTGRES_PASSWORD is required}
+    volumes:
+      - auth-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth_app -d auth"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - auth-database
+
   bmkg:
     build:
       context: ./services/bmkg
@@ -93,8 +110,8 @@ services:
       AGGREGATOR_HTTP_TIMEOUT_MS: ${AGGREGATOR_HTTP_TIMEOUT_MS:-4000}
       AGGREGATOR_MAX_IN_FLIGHT: ${AGGREGATOR_MAX_IN_FLIGHT:-64}
       AGGREGATOR_START_SINCE: ${AGGREGATOR_START_SINCE:-1970-01-01T00:00:00Z}
-    ports:
-      - "8083:8083"
+    expose:
+      - "8083"
     depends_on:
       bmkg:
         condition: service_healthy
@@ -114,18 +131,56 @@ services:
       - default
       - database
 
+  auth:
+    build:
+      context: ./services/auth
+    environment:
+      AUTH_LISTEN_ADDRESS: :8084
+      AUTH_DATABASE_URL: ${AUTH_DATABASE_URL:?AUTH_DATABASE_URL is required}
+      AUTH_ACCESS_TOKEN_TTL_SECONDS: ${AUTH_ACCESS_TOKEN_TTL_SECONDS:-60}
+      AUTH_REFRESH_TOKEN_TTL_SECONDS: ${AUTH_REFRESH_TOKEN_TTL_SECONDS:-86400}
+      AUTH_MAX_IN_FLIGHT: ${AUTH_MAX_IN_FLIGHT:-32}
+      AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-bnpb-auth-service}
+      AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-bnpb-client-api}
+      AUTH_JWT_KEY_ID: ${AUTH_JWT_KEY_ID:-bnpb-auth-2026-01}
+      AUTH_JWT_PRIVATE_KEY_B64: ${AUTH_JWT_PRIVATE_KEY_B64:?AUTH_JWT_PRIVATE_KEY_B64 is required}
+      MEDIA_CLIENT_ID: ${MEDIA_CLIENT_ID:-media-client}
+      MEDIA_CLIENT_SECRET: ${MEDIA_CLIENT_SECRET:?MEDIA_CLIENT_SECRET is required}
+      FIELD_CLIENT_ID: ${FIELD_CLIENT_ID:-field-client}
+      FIELD_CLIENT_SECRET: ${FIELD_CLIENT_SECRET:?FIELD_CLIENT_SECRET is required}
+      OPS_CLIENT_ID: ${OPS_CLIENT_ID:-ops-client}
+      OPS_CLIENT_SECRET: ${OPS_CLIENT_SECRET:?OPS_CLIENT_SECRET is required}
+    ports:
+      - "8084:8084"
+    depends_on:
+      auth-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8084/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - default
+      - auth-database
+
   client-api:
     build:
       context: ./services/client-api
     environment:
       AGGREGATOR_URL: http://aggregator:8083
       AGGREGATOR_API_KEY: ${AGGREGATOR_API_KEY:?AGGREGATOR_API_KEY is required}
-      CLIENT_API_KEY: ${CLIENT_API_KEY:?CLIENT_API_KEY is required}
+      AUTH_JWKS_URL: http://auth:8084/.well-known/jwks.json
+      AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-bnpb-auth-service}
+      AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-bnpb-client-api}
       CLIENT_API_MAX_IN_FLIGHT: ${CLIENT_API_MAX_IN_FLIGHT:-64}
     ports:
       - "8080:8080"
     depends_on:
       aggregator:
+        condition: service_healthy
+      auth:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
@@ -134,10 +189,61 @@ services:
       timeout: 3s
       retries: 3
 
+  dashboard-consumer:
+    build:
+      context: ./services/dashboard-consumer
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-hazard.events.v1}
+      DASHBOARD_CONSUMER_GROUP: ${DASHBOARD_CONSUMER_GROUP:-dashboard-updater-v1}
+      DASHBOARD_LISTEN_ADDRESS: :8085
+      DASHBOARD_STORE_PATH: /data/dashboard.db
+    ports:
+      - "8085:8085"
+    volumes:
+      - dashboard-consumer-data:/data
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8085/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  notifier-consumer:
+    build:
+      context: ./services/notifier-consumer
+    environment:
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      KAFKA_TOPIC: ${KAFKA_TOPIC:-hazard.events.v1}
+      NOTIFIER_CONSUMER_GROUP: ${NOTIFIER_CONSUMER_GROUP:-field-notifier-v1}
+      NOTIFIER_LISTEN_ADDRESS: :8086
+      NOTIFIER_STORE_PATH: /data/notifier.db
+    ports:
+      - "8086:8086"
+    volumes:
+      - notifier-consumer-data:/data
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
 networks:
   database:
+    internal: true
+  auth-database:
     internal: true
 
 volumes:
   aggregator-postgres-data:
+  auth-postgres-data:
   kafka-data:
+  dashboard-consumer-data:
+  notifier-consumer-data:
