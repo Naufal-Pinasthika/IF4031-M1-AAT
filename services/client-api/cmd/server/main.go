@@ -5,8 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -35,28 +35,31 @@ type Server struct {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "client-api")
 	aggregatorURL := os.Getenv("AGGREGATOR_URL")
 	aggregatorKey := os.Getenv("AGGREGATOR_API_KEY")
 	jwksURL := os.Getenv("AUTH_JWKS_URL")
 	issuer := envOrDefault("AUTH_JWT_ISSUER", "bnpb-auth-service")
 	audience := envOrDefault("AUTH_JWT_AUDIENCE", "bnpb-client-api")
 	if aggregatorURL == "" || aggregatorKey == "" || jwksURL == "" {
-		log.Fatal("AGGREGATOR_URL, AGGREGATOR_API_KEY, and AUTH_JWKS_URL are required")
+		logger.Error("configuration_invalid", "error", "AGGREGATOR_URL, AGGREGATOR_API_KEY, and AUTH_JWKS_URL are required")
+		os.Exit(1)
 	}
 
 	maxInFlight := 64
 	if raw := os.Getenv("CLIENT_API_MAX_IN_FLIGHT"); raw != "" {
 		value, err := strconv.Atoi(raw)
 		if err != nil || value <= 0 {
-			log.Fatal("CLIENT_API_MAX_IN_FLIGHT must be a positive integer")
+			logger.Error("configuration_invalid", "error", "CLIENT_API_MAX_IN_FLIGHT must be a positive integer")
+			os.Exit(1)
 		}
 		maxInFlight = value
 	}
 
 	verifier, err := NewJWTVerifier(context.Background(), jwksURL, issuer, audience, logger)
 	if err != nil {
-		log.Fatalf("initialize JWT verifier: %v", err)
+		logger.Error("jwt_verifier_initialization_failed", "error", err)
+		os.Exit(1)
 	}
 	server := &Server{
 		client:        newAggregatorClient(maxInFlight),
@@ -95,7 +98,8 @@ func main() {
 	}
 	logger.Info("client_api_server_started", "address", ":8080")
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+		logger.Error("client_api_server_stopped", "error", err)
+		os.Exit(1)
 	}
 }
 
@@ -139,7 +143,10 @@ func (s *Server) forwardRaw(w http.ResponseWriter, r *http.Request, path string)
 		return
 	}
 	defer response.Body.Close()
-	copyAggregatorResponse(w, response)
+	if err := copyAggregatorResponse(w, response); err != nil {
+		s.logAggregatorResponseFailure(r, response.StatusCode, startedAt, err)
+		return
+	}
 	s.logAggregatorDone(r, response.StatusCode, startedAt)
 }
 
@@ -166,20 +173,30 @@ func (s *Server) forwardEvents(w http.ResponseWriter, r *http.Request, path stri
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		copyAggregatorResponse(w, response)
+		if err := copyAggregatorResponse(w, response); err != nil {
+			s.logAggregatorResponseFailure(r, response.StatusCode, startedAt, err)
+			return
+		}
 		s.logAggregatorDone(r, response.StatusCode, startedAt)
 		return
 	}
 
 	limited := io.LimitReader(response.Body, maxAggregatorResponseBytes+1)
 	data, err := io.ReadAll(limited)
-	if err != nil || len(data) > maxAggregatorResponseBytes {
+	if err != nil {
+		s.logAggregatorResponseFailure(r, response.StatusCode, startedAt, err)
+		writeError(w, http.StatusBadGateway, "invalid aggregator response")
+		return
+	}
+	if len(data) > maxAggregatorResponseBytes {
+		s.logAggregatorResponseFailure(r, response.StatusCode, startedAt, errors.New("aggregator response exceeds size limit"))
 		writeError(w, http.StatusBadGateway, "invalid aggregator response")
 		return
 	}
 	if single {
 		var envelope EventEnvelope
 		if err := json.Unmarshal(data, &envelope); err != nil {
+			s.logAggregatorResponseFailure(r, response.StatusCode, startedAt, err)
 			writeError(w, http.StatusBadGateway, "invalid aggregator response")
 			return
 		}
@@ -190,6 +207,7 @@ func (s *Server) forwardEvents(w http.ResponseWriter, r *http.Request, path stri
 	} else {
 		var envelope EventsEnvelope
 		if err := json.Unmarshal(data, &envelope); err != nil {
+			s.logAggregatorResponseFailure(r, response.StatusCode, startedAt, err)
 			writeError(w, http.StatusBadGateway, "invalid aggregator response")
 			return
 		}
@@ -229,13 +247,18 @@ func (s *Server) logAggregatorDone(r *http.Request, status int, startedAt time.T
 	s.logger.Info("aggregator_request_done", "status", status, "correlation_id", correlationID(r.Context()), "latency_ms", time.Since(startedAt).Milliseconds())
 }
 
-func copyAggregatorResponse(w http.ResponseWriter, response *http.Response) {
+func (s *Server) logAggregatorResponseFailure(r *http.Request, status int, startedAt time.Time, err error) {
+	s.logger.Error("aggregator_response_failed", "error", err, "status", status, "correlation_id", correlationID(r.Context()), "latency_ms", time.Since(startedAt).Milliseconds())
+}
+
+func copyAggregatorResponse(w http.ResponseWriter, response *http.Response) error {
 	w.Header().Set("Content-Type", "application/json")
 	if retryAfter := response.Header.Get("Retry-After"); retryAfter != "" {
 		w.Header().Set("Retry-After", retryAfter)
 	}
 	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(w, io.LimitReader(response.Body, maxAggregatorResponseBytes))
+	_, err := io.Copy(w, io.LimitReader(response.Body, maxAggregatorResponseBytes))
+	return err
 }
 
 func bearerToken(value string) (string, bool) {

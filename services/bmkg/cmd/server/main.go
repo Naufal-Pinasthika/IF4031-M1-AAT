@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -13,15 +16,30 @@ import (
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/bmkg/internal/middleware"
 )
 
-func main()  {
-	// init generator data 
-	// configure `x * time.Second' to set the event more faster/slower
-	const eventInterval = 10 * time.Second		
-	go data.StartGenerator(context.Background(), 10*time.Second)
+func durationMSFromEnv(name string, fallbackMS int) (time.Duration, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return time.Duration(fallbackMS) * time.Millisecond, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer in milliseconds", name)
+	}
+	return time.Duration(value) * time.Millisecond, nil
+}
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "bmkg")
+	eventInterval, err := durationMSFromEnv("BMKG_EVENT_INTERVAL_MS", 10000)
+	if err != nil {
+		logger.Error("configuration_invalid", "error", err)
+		os.Exit(1)
+	}
+	go data.StartGenerator(context.Background(), eventInterval)
 
 	// init chi router
 	r := chi.NewRouter()
-	
+
 	// init logger
 	r.Use(middleware.RequestLogger("bmkg"))
 
@@ -36,13 +54,9 @@ func main()  {
 		protected.Get("/tsunami-warnings", handler.GetTsunamiWarnings)
 	})
 
-	// listen to port 8081
-	log.Println("BMKG server running at :8081")
-	err := http.ListenAndServe(":8081", r)
-
-	if err != nil {
-		log.Fatal(err)
+	logger.Info("bmkg_server_started", "address", ":8081", "event_interval_ms", eventInterval.Milliseconds())
+	if err := http.ListenAndServe(":8081", r); err != nil {
+		logger.Error("bmkg_server_stopped", "error", err)
+		os.Exit(1)
 	}
-
-
 }
