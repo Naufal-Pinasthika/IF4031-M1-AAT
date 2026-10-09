@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/auth/internal/config"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/auth/internal/correlation"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/auth/internal/handler"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/auth/internal/service"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/auth/internal/store"
@@ -18,27 +18,32 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "auth")
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("configuration_invalid", "error", err)
+		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	authStore, err := store.New(ctx, cfg.DatabaseURL)
+	startupCtx := correlation.WithID(ctx, "startup")
+	authStore, err := store.New(startupCtx, cfg.DatabaseURL, logger)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("store_initialization_failed", "error", err)
+		os.Exit(1)
 	}
 	defer authStore.Close()
-	if err := authStore.SeedClients(ctx, cfg.Clients); err != nil {
-		log.Fatal(err)
+	if err := authStore.SeedClients(startupCtx, cfg.Clients); err != nil {
+		logger.Error("client_seed_failed", "error", err)
+		os.Exit(1)
 	}
 
 	signer, err := token.NewSigner(cfg.PrivateKeyPEM, cfg.Issuer, cfg.Audience, cfg.KeyID, cfg.AccessTokenTTL)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("token_signer_initialization_failed", "error", err)
+		os.Exit(1)
 	}
 	authService := service.New(authStore, signer, cfg.RefreshTTL)
 	authHandler := handler.New(authService, signer, authStore, logger)
@@ -67,6 +72,7 @@ func main() {
 
 	logger.Info("auth_server_started", "address", cfg.ListenAddress)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+		logger.Error("auth_server_stopped", "error", err)
+		os.Exit(1)
 	}
 }
