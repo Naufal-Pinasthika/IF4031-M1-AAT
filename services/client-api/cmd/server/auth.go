@@ -142,12 +142,16 @@ func (v *JWTVerifier) refreshLocked(ctx context.Context, correlationID string) e
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("JWKS endpoint returned HTTP %d", response.StatusCode)
+		err := fmt.Errorf("JWKS endpoint returned HTTP %d", response.StatusCode)
+		v.logger.Error("jwks_refresh_failed", "error", err, "status", response.StatusCode, "correlation_id", correlationID, "latency_ms", time.Since(started).Milliseconds())
+		return err
 	}
 	var document jwksDocument
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 1<<20))
 	if err := decoder.Decode(&document); err != nil {
-		return fmt.Errorf("decode JWKS: %w", err)
+		err = fmt.Errorf("decode JWKS: %w", err)
+		v.logger.Error("jwks_refresh_failed", "error", err, "status", response.StatusCode, "correlation_id", correlationID, "latency_ms", time.Since(started).Milliseconds())
+		return err
 	}
 	keys := make(map[string]*rsa.PublicKey, len(document.Keys))
 	for _, value := range document.Keys {
@@ -156,17 +160,21 @@ func (v *JWTVerifier) refreshLocked(ctx context.Context, correlationID string) e
 		}
 		key, err := rsaPublicKey(value.N, value.E)
 		if err != nil {
-			return fmt.Errorf("decode JWKS key %q: %w", value.KeyID, err)
+			err = fmt.Errorf("decode JWKS key %q: %w", value.KeyID, err)
+			v.logger.Error("jwks_refresh_failed", "error", err, "status", response.StatusCode, "correlation_id", correlationID, "latency_ms", time.Since(started).Milliseconds())
+			return err
 		}
 		keys[value.KeyID] = key
 	}
 	if len(keys) == 0 {
-		return errors.New("JWKS contains no usable RS256 signing keys")
+		err := errors.New("JWKS contains no usable RS256 signing keys")
+		v.logger.Error("jwks_refresh_failed", "error", err, "status", response.StatusCode, "correlation_id", correlationID, "latency_ms", time.Since(started).Milliseconds())
+		return err
 	}
 	v.mu.Lock()
 	v.keys = keys
 	v.mu.Unlock()
-	v.logger.Info("jwks_refresh_done", "key_count", len(keys), "correlation_id", correlationID, "latency_ms", time.Since(started).Milliseconds())
+	v.logger.Info("jwks_refresh_done", "key_count", len(keys), "status", response.StatusCode, "correlation_id", correlationID, "latency_ms", time.Since(started).Milliseconds())
 	return nil
 }
 

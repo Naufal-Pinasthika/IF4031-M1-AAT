@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,11 +19,13 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "notifier-consumer")
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("configuration_invalid", "error", err)
+		os.Exit(1)
 	}
 	notificationStore, err := store.Open(cfg.StorePath)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("store_initialization_failed", "error", err)
+		os.Exit(1)
 	}
 	defer notificationStore.Close()
 
@@ -51,6 +52,7 @@ func main() {
 
 	logger.Info("notifier_consumer_started", "address", cfg.ListenAddress, "topic", cfg.KafkaTopic, "consumer_group", cfg.ConsumerGroup)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+		logger.Error("notifier_consumer_server_stopped", "error", err)
+		os.Exit(1)
 	}
 }

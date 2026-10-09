@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -16,33 +17,47 @@ import (
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/pvmbg/internal/state"
 )
 
-func requiredDurationMS(name string) time.Duration {
+func requiredDurationMS(name string) (time.Duration, error) {
 	raw := os.Getenv(name)
 
 	if raw == "" {
-		log.Fatalf("%s is not configured", name)
+		return 0, fmt.Errorf("%s is not configured", name)
 	}
 
 	ms, err := strconv.Atoi(raw)
 	if err != nil || ms <= 0 {
-		log.Fatalf("%s must be a positive integer in milliseconds", name)
+		return 0, fmt.Errorf("%s must be a positive integer in milliseconds", name)
 	}
 
-	return time.Duration(ms) * time.Millisecond
+	return time.Duration(ms) * time.Millisecond, nil
 }
 
 func main() {
-	//init token
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "pvmbg")
 	pvmbgToken := os.Getenv("PVMBG_TOKEN")
 	if pvmbgToken == "" {
-		log.Fatal("PVMBG_TOKEN is not configured")
+		logger.Error("configuration_invalid", "error", "PVMBG_TOKEN is not configured")
+		os.Exit(1)
 	}
-	minDelay := requiredDurationMS("PVMBG_DELAY_MIN_MS")
-	maxDelay := requiredDurationMS("PVMBG_DELAY_MAX_MS")
-	eventInterval := requiredDurationMS("PVMBG_EVENT_INTERVAL_MS")
+	minDelay, err := requiredDurationMS("PVMBG_DELAY_MIN_MS")
+	if err != nil {
+		logger.Error("configuration_invalid", "error", err)
+		os.Exit(1)
+	}
+	maxDelay, err := requiredDurationMS("PVMBG_DELAY_MAX_MS")
+	if err != nil {
+		logger.Error("configuration_invalid", "error", err)
+		os.Exit(1)
+	}
+	eventInterval, err := requiredDurationMS("PVMBG_EVENT_INTERVAL_MS")
+	if err != nil {
+		logger.Error("configuration_invalid", "error", err)
+		os.Exit(1)
+	}
 
 	if minDelay > maxDelay {
-		log.Fatal("PVMBG_DELAY_MIN_MS cannot be greater than PVMBG_DELAY_MAX_MS")
+		logger.Error("configuration_invalid", "error", "PVMBG_DELAY_MIN_MS cannot be greater than PVMBG_DELAY_MAX_MS")
+		os.Exit(1)
 	}
 	go data.StartGenerator(context.Background(), eventInterval)
 
@@ -71,12 +86,9 @@ func main() {
 			Get("/volcanic-reports", volcanicHandler.GetReports)
 	})
 
-	// listen to port 8082
-	log.Println("PVMBG server running at :8082")
-	err := http.ListenAndServe(":8082", r)
-
-	if err != nil {
-		log.Fatal(err)
+	logger.Info("pvmbg_server_started", "address", ":8082", "delay_min_ms", minDelay.Milliseconds(), "delay_max_ms", maxDelay.Milliseconds(), "event_interval_ms", eventInterval.Milliseconds())
+	if err := http.ListenAndServe(":8082", r); err != nil {
+		logger.Error("pvmbg_server_stopped", "error", err)
+		os.Exit(1)
 	}
-
 }
