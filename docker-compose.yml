@@ -40,6 +40,7 @@ services:
       context: ./services/bmkg
     environment:
       BMKG_API_KEY: ${BMKG_API_KEY:?BMKG_API_KEY is required}
+      BMKG_EVENT_INTERVAL_MS: ${BMKG_EVENT_INTERVAL_MS:-10000}
     ports:
       - "8081:8081"
     restart: unless-stopped
@@ -103,7 +104,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
       KAFKA_TOPIC: ${KAFKA_TOPIC:-hazard.events.v1}
-      AGGREGATOR_LISTEN_ADDRESS: :8083
+      AGGREGATOR_LISTEN_ADDRESS: ${AGGREGATOR_LISTEN_ADDRESS:-:8083}
       BMKG_URL: ${BMKG_URL:-http://bmkg:8081}
       PVMBG_URL: ${PVMBG_URL:-http://pvmbg:8082}
       AGGREGATOR_POLL_INTERVAL_MS: ${AGGREGATOR_POLL_INTERVAL_MS:-5000}
@@ -135,7 +136,7 @@ services:
     build:
       context: ./services/auth
     environment:
-      AUTH_LISTEN_ADDRESS: :8084
+      AUTH_LISTEN_ADDRESS: ${AUTH_LISTEN_ADDRESS:-:8084}
       AUTH_DATABASE_URL: ${AUTH_DATABASE_URL:?AUTH_DATABASE_URL is required}
       AUTH_ACCESS_TOKEN_TTL_SECONDS: ${AUTH_ACCESS_TOKEN_TTL_SECONDS:-60}
       AUTH_REFRESH_TOKEN_TTL_SECONDS: ${AUTH_REFRESH_TOKEN_TTL_SECONDS:-86400}
@@ -169,9 +170,9 @@ services:
     build:
       context: ./services/client-api
     environment:
-      AGGREGATOR_URL: http://aggregator:8083
+      AGGREGATOR_URL: ${AGGREGATOR_URL:-http://aggregator:8083}
       AGGREGATOR_API_KEY: ${AGGREGATOR_API_KEY:?AGGREGATOR_API_KEY is required}
-      AUTH_JWKS_URL: http://auth:8084/.well-known/jwks.json
+      AUTH_JWKS_URL: ${AUTH_JWKS_URL:-http://auth:8084/.well-known/jwks.json}
       AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-bnpb-auth-service}
       AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-bnpb-client-api}
       CLIENT_API_MAX_IN_FLIGHT: ${CLIENT_API_MAX_IN_FLIGHT:-64}
@@ -196,8 +197,8 @@ services:
       KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
       KAFKA_TOPIC: ${KAFKA_TOPIC:-hazard.events.v1}
       DASHBOARD_CONSUMER_GROUP: ${DASHBOARD_CONSUMER_GROUP:-dashboard-updater-v1}
-      DASHBOARD_LISTEN_ADDRESS: :8085
-      DASHBOARD_STORE_PATH: /data/dashboard.db
+      DASHBOARD_LISTEN_ADDRESS: ${DASHBOARD_LISTEN_ADDRESS:-:8085}
+      DASHBOARD_STORE_PATH: ${DASHBOARD_STORE_PATH:-/data/dashboard.db}
     ports:
       - "8085:8085"
     volumes:
@@ -219,8 +220,8 @@ services:
       KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
       KAFKA_TOPIC: ${KAFKA_TOPIC:-hazard.events.v1}
       NOTIFIER_CONSUMER_GROUP: ${NOTIFIER_CONSUMER_GROUP:-field-notifier-v1}
-      NOTIFIER_LISTEN_ADDRESS: :8086
-      NOTIFIER_STORE_PATH: /data/notifier.db
+      NOTIFIER_LISTEN_ADDRESS: ${NOTIFIER_LISTEN_ADDRESS:-:8086}
+      NOTIFIER_STORE_PATH: ${NOTIFIER_STORE_PATH:-/data/notifier.db}
     ports:
       - "8086:8086"
     volumes:
