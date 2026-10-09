@@ -36,6 +36,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	if databaseURL == "" {
+		return Config{}, fmt.Errorf("DATABASE_URL is required")
+	}
 
 	startSince := time.Unix(0, 0).UTC()
 	if raw := os.Getenv("AGGREGATOR_START_SINCE"); raw != "" {
@@ -46,8 +50,8 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		ListenAddress:   envOrDefault("AGGREGATOR_LISTEN_ADDRESS", ":8080"),
-		DatabaseURL:     envOrDefault("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/aggregator?sslmode=disable"),
+		ListenAddress:   envOrDefault("AGGREGATOR_LISTEN_ADDRESS", ":8083"),
+		DatabaseURL:     databaseURL,
 		KafkaBrokers:    splitCommaSeparated(os.Getenv("KAFKA_BROKERS"), "localhost:9092"),
 		KafkaTopic:      envOrDefault("KAFKA_TOPIC", "hazard.events.v1"),
 		BMKGURL:         envOrDefault("BMKG_URL", "http://localhost:8081"),

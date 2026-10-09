@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,30 +12,35 @@ import (
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/aggregator"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/broker"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/config"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/correlation"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/handler"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/status"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/store"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "aggregator")
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("configuration_invalid", "error", err)
+		os.Exit(1)
 	}
 
 	// poller/aggregator init
-	client := aggregator.NewClient(cfg.HTTPTimeout)
+	client := aggregator.NewClient(cfg.HTTPTimeout, logger)
 	poller := aggregator.New(client, cfg, logger)
-	eventStore, err := store.New(context.Background(), cfg.DatabaseURL)
+	startupCtx := correlation.WithID(context.Background(), "startup")
+	eventStore, err := store.New(startupCtx, cfg.DatabaseURL, logger)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("store_initialization_failed", "error", err)
+		os.Exit(1)
 	}
 	defer eventStore.Close()
 
 	publisher, err := broker.NewKafkaPublisher(cfg.KafkaBrokers, cfg.KafkaTopic)
 	if err != nil {
-		log.Fatal(err)
+		logger.Error("publisher_initialization_failed", "error", err)
+		os.Exit(1)
 	}
 	defer publisher.Close()
 	tracker := status.NewTracker()
@@ -58,12 +62,13 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
-		Handler:           mux,
+		Handler:           handler.Logging(logger, mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	logger.Info("aggregator_server_started", "address", cfg.ListenAddress)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+		logger.Error("aggregator_server_stopped", "error", err)
+		os.Exit(1)
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/broker"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/config"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/correlation"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/status"
 )
@@ -28,6 +29,25 @@ type Aggregator struct {
 	config    config.Config
 	logger    *slog.Logger
 	status    *status.Tracker
+}
+
+type volcanoReference struct {
+	Name      string
+	Latitude  float64
+	Longitude float64
+}
+
+var volcanoReferences = map[string]volcanoReference{
+	"MERAPI":        {Name: "Gunung Merapi", Latitude: -7.54130669258, Longitude: 110.44627086700},
+	"SEMERU":        {Name: "Gunung Semeru", Latitude: -8.11284536216, Longitude: 112.92476270100},
+	"ANAK_KRAKATAU": {Name: "Gunung Anak Krakatau", Latitude: -6.10281411180, Longitude: 105.42279349400},
+	"AGUNG":         {Name: "Gunung Agung", Latitude: -8.34397911664, Longitude: 115.50748172600},
+	"RINJANI":       {Name: "Gunung Rinjani", Latitude: -8.41111052321, Longitude: 116.42315870100},
+	"LEWOTOBI":      {Name: "Gunung Lewotobi", Latitude: -8.53809642487, Longitude: 122.76735601700},
+	"MARAPI":        {Name: "Gunung Marapi", Latitude: -0.39106938431, Longitude: 100.45709783400},
+	"KERINCI":       {Name: "Gunung Kerinci", Latitude: -1.69600133075, Longitude: 101.26719098600},
+	"IBU":           {Name: "Gunung Ibu", Latitude: 1.488, Longitude: 127.630},
+	"DUKONO":        {Name: "Gunung Dukono", Latitude: 1.69867327144, Longitude: 127.87801665200},
 }
 
 func NewAggregator(poller *Poller, store EventStore, publisher EventPublisher, cfg config.Config, logger *slog.Logger, tracker *status.Tracker) *Aggregator {
@@ -140,10 +160,11 @@ func (a *Aggregator) processBMKG(ctx context.Context, batch BMKGBatch) error {
 			return err
 		}
 
-		if err := a.store.Upsert(ctx, &hazard); err != nil {
+		operationCtx := correlation.WithID(ctx, batch.CorrelationID)
+		if err := a.store.Upsert(operationCtx, &hazard); err != nil {
 			return err
 		}
-		if err := a.publish(ctx, hazard, batch.CorrelationID); err != nil {
+		if err := a.publish(operationCtx, hazard, batch.CorrelationID); err != nil {
 			return err
 		}
 	}
@@ -159,10 +180,11 @@ func (a *Aggregator) processPVMBG(ctx context.Context, batch PVMBGBatch) error {
 			return err
 		}
 
-		if err := a.store.Upsert(ctx, &hazard); err != nil {
+		operationCtx := correlation.WithID(ctx, batch.CorrelationID)
+		if err := a.store.Upsert(operationCtx, &hazard); err != nil {
 			return err
 		}
-		if err := a.publish(ctx, hazard, batch.CorrelationID); err != nil {
+		if err := a.publish(operationCtx, hazard, batch.CorrelationID); err != nil {
 			return err
 		}
 	}
@@ -260,26 +282,18 @@ func mapSeismic(event SeismicEvent, warning *TsunamiWarning) (model.HazardEvent,
 }
 
 func mapVolcanic(report VolcanicReport) (model.HazardEvent, error) {
-	volcanoPos := map[string][2]float64{
-		"MERAPI":        {-7.54130669258, 110.44627086700},
-		"SEMERU":        {-8.11284536216, 112.92476270100},
-		"ANAK_KRAKATAU": {-6.10281411180, 105.42279349400},
-		"AGUNG":         {-8.34397911664, 115.50748172600},
-		"RINJANI":       {-8.41111052321, 116.42315870100},
-		"LEWOTOBI":      {-8.53809642487, 122.76735601700},
-		"MARAPI":        {-0.39106938431, 100.45709783400},
-		"KERINCI":       {-1.69600133075, 101.26719098600},
-		"IBU":           {1.488, 127.630},
-		"DUKONO":        {1.69867327144, 127.87801665200},
+	reference, ok := volcanoReferences[report.VolcanoID]
+	if !ok {
+		return model.HazardEvent{}, fmt.Errorf("unknown volcano_id %q", report.VolcanoID)
 	}
 
 	result := model.HazardEvent{
 		Source:      model.SourcePVMBG,
 		SourceRefID: report.ReportID,
 		HazardType:  model.HazardTypeVOLCANIC,
-		AreaName:    report.VolcanoID,
-		Latitude:    volcanoPos[report.VolcanoID][0],
-		Longitude:   volcanoPos[report.VolcanoID][1],
+		AreaName:    reference.Name,
+		Latitude:    reference.Latitude,
+		Longitude:   reference.Longitude,
 		OccuredAt:   report.ReportedAt,
 	}
 
@@ -296,7 +310,10 @@ func mapVolcanic(report VolcanicReport) (model.HazardEvent, error) {
 	}
 
 	// Map extra attributes
-	attributes := make(map[string]any)
+	attributes := map[string]any{
+		"eruption_count_24h":  report.EruptionCount24H,
+		"ash_column_height_m": report.AshColumnHeightM,
+	}
 	for key, rawValue := range report.Extra {
 		var value any
 		if err := json.Unmarshal(rawValue, &value); err != nil {
