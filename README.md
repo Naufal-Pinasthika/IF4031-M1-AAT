@@ -141,6 +141,8 @@ services/
   database/             Canonical PostgreSQL initialization
   notifier-consumer/    Kafka consumer and notifier-owned bbolt state
   pvmbg/                Delayed volcanic-report mock with schema/outage controls
+scripts/
+  setup-env.sh          Generate local secrets and the Auth RSA signing key
 docker-compose.yml       Full-system orchestration
 .env.example             Complete configuration template with placeholder secrets
 go.work                  Go workspace for all seven modules
@@ -151,7 +153,7 @@ go.work                  Go workspace for all seven modules
 ### Requirements
 
 - Docker Engine with Docker Compose v2, or Docker Desktop through WSL
-- Go 1.25 for generating the JWT signing key and local checks
+- Go 1.25 for optional local checks
 - OpenSSL for generating local example secrets
 - `curl` for API calls
 - `jq` for the demonstration commands
@@ -162,39 +164,14 @@ All shell commands below are written for Bash and can be run from WSL.
 ### 1. Create the local environment
 
 ```bash
-cp .env.example .env
+bash ./scripts/setup-env.sh
 ```
 
-Values beginning with `replace-with-` are placeholders. Replace them with
-unique values before starting the system. This Bash helper generates safe
-random values while preserving repeated database-password references:
-
-```bash
-replace_secret() {
-  local placeholder="$1"
-  local value
-  value="$(openssl rand -hex 24)"
-  sed -i "s|${placeholder}|${value}|g" .env
-}
-
-for placeholder in \
-  replace-with-bmkg-api-key \
-  replace-with-pvmbg-token \
-  replace-with-aggregator-api-key \
-  replace-with-postgres-admin-password \
-  replace-with-aggregator-app-password \
-  replace-with-auth-postgres-password \
-  replace-with-unique-media-secret \
-  replace-with-unique-field-secret \
-  replace-with-unique-ops-secret
-do
-  replace_secret "$placeholder"
-done
-
-JWT_KEY="$(go run ./services/auth/cmd/keygen)"
-sed -i "s|replace-with-base64-pem-rsa-private-key|${JWT_KEY}|" .env
-unset JWT_KEY
-```
+The script copies `.env.example` to `.env`, replaces every `replace-with-*`
+placeholder with a unique random value, and generates the RSA private key used
+to sign access tokens. It refuses to overwrite an existing `.env`; use
+`bash ./scripts/setup-env.sh --force` only when the current local configuration
+may be replaced.
 
 > [!IMPORTANT]
 > `.env.example` is documentation, not a ready-to-use credential file. Keep
