@@ -7,11 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/auth/internal/correlation"
 )
-
-type contextKey string
-
-const correlationIDKey contextKey = "correlation_id"
 
 type statusWriter struct {
 	http.ResponseWriter
@@ -30,7 +28,7 @@ func Logging(logger *slog.Logger, next http.Handler) http.Handler {
 			correlationID = newCorrelationID()
 		}
 		w.Header().Set("X-Correlation-ID", correlationID)
-		ctx := context.WithValue(r.Context(), correlationIDKey, correlationID)
+		ctx := correlation.WithID(r.Context(), correlationID)
 		wrapped := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		started := time.Now()
 		next.ServeHTTP(wrapped, r.WithContext(ctx))
@@ -53,8 +51,7 @@ func Limit(maxInFlight int, next http.Handler) http.Handler {
 }
 
 func CorrelationID(ctx context.Context) string {
-	value, _ := ctx.Value(correlationIDKey).(string)
-	return value
+	return correlation.ID(ctx)
 }
 
 func newCorrelationID() string {
