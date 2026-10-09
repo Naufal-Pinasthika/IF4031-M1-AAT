@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"time"
@@ -59,14 +60,15 @@ type VolcanicReport struct {
 
 type Client struct {
 	httpClient *http.Client
+	logger     *slog.Logger
 }
 
-func NewClient(timeout time.Duration) *Client {
-	return &Client{httpClient: &http.Client{Timeout: timeout}}
+func NewClient(timeout time.Duration, logger *slog.Logger) *Client {
+	return &Client{httpClient: &http.Client{Timeout: timeout}, logger: logger}
 }
 
 func (c *Client) FetchBMKG(ctx context.Context, baseURL, apiKey, correlationID string, since time.Time) ([]SeismicEvent, []TsunamiWarning, error) {
-	seismic, err := fetchJSON[SeismicEvent](c, ctx, baseURL+"/seismic-events", since, func(request *http.Request) {
+	seismic, err := fetchJSON[SeismicEvent](c, ctx, baseURL+"/seismic-events", "BMKG", "seismic_events", correlationID, since, func(request *http.Request) {
 		request.Header.Set("X-BMKG-Key", apiKey)
 		request.Header.Set("X-Correlation-ID", correlationID)
 	})
@@ -74,7 +76,7 @@ func (c *Client) FetchBMKG(ctx context.Context, baseURL, apiKey, correlationID s
 		return nil, nil, fmt.Errorf("fetch BMKG seismic events: %w", err)
 	}
 
-	warnings, err := fetchJSON[TsunamiWarning](c, ctx, baseURL+"/tsunami-warnings", since, func(request *http.Request) {
+	warnings, err := fetchJSON[TsunamiWarning](c, ctx, baseURL+"/tsunami-warnings", "BMKG", "tsunami_warnings", correlationID, since, func(request *http.Request) {
 		request.Header.Set("X-BMKG-Key", apiKey)
 		request.Header.Set("X-Correlation-ID", correlationID)
 	})
@@ -85,7 +87,7 @@ func (c *Client) FetchBMKG(ctx context.Context, baseURL, apiKey, correlationID s
 }
 
 func (c *Client) FetchPVMBG(ctx context.Context, baseURL, token, correlationID string, since time.Time) ([]VolcanicReport, error) {
-	reports, err := fetchJSON[VolcanicReport](c, ctx, baseURL+"/volcanic-reports", since, func(request *http.Request) {
+	reports, err := fetchJSON[VolcanicReport](c, ctx, baseURL+"/volcanic-reports", "PVMBG", "volcanic_reports", correlationID, since, func(request *http.Request) {
 		request.Header.Set("Authorization", "Bearer "+token)
 		request.Header.Set("X-Correlation-ID", correlationID)
 	})
@@ -95,7 +97,7 @@ func (c *Client) FetchPVMBG(ctx context.Context, baseURL, token, correlationID s
 	return reports, nil
 }
 
-func fetchJSON[T any](c *Client, ctx context.Context, endpoint string, since time.Time, configure func(*http.Request)) ([]T, error) {
+func fetchJSON[T any](c *Client, ctx context.Context, endpoint, dependency, operation, correlationID string, since time.Time, configure func(*http.Request)) ([]T, error) {
 	var result []T
 	requestURL, err := url.Parse(endpoint)
 	if err != nil {
@@ -110,18 +112,23 @@ func fetchJSON[T any](c *Client, ctx context.Context, endpoint string, since tim
 		return result, err
 	}
 	configure(request)
+	startedAt := time.Now()
 	response, err := c.httpClient.Do(request)
 	if err != nil {
+		c.logger.Error("outbound_http_failed", "dependency", dependency, "operation", operation, "correlation_id", correlationID, "latency_ms", time.Since(startedAt).Milliseconds(), "error", err)
 		return result, err
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		c.logger.Warn("outbound_http_completed", "dependency", dependency, "operation", operation, "status", response.StatusCode, "correlation_id", correlationID, "latency_ms", time.Since(startedAt).Milliseconds())
 		return result, fmt.Errorf("source returned HTTP %d", response.StatusCode)
 	}
 	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		c.logger.Error("outbound_http_decode_failed", "dependency", dependency, "operation", operation, "status", response.StatusCode, "correlation_id", correlationID, "latency_ms", time.Since(startedAt).Milliseconds(), "error", err)
 		return result, err
 	}
+	c.logger.Info("outbound_http_completed", "dependency", dependency, "operation", operation, "status", response.StatusCode, "correlation_id", correlationID, "latency_ms", time.Since(startedAt).Milliseconds())
 	return result, nil
 }
 

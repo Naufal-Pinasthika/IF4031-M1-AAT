@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,8 +16,13 @@ type Store struct {
 	pool *pgxpool.Pool
 }
 
-func New(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+func New(ctx context.Context, databaseURL string, logger *slog.Logger) (*Store, error) {
+	poolConfig, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse postgres configuration: %w", err)
+	}
+	poolConfig.ConnConfig.Tracer = &postgresTracer{logger: logger}
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create postgres pool: %w", err)
 	}
