@@ -200,10 +200,12 @@ Start all containers with one orchestration command:
 docker compose config --quiet
 docker compose up -d --build
 docker compose ps
+docker compose ps -a kafka-init
 ```
 
-Wait until all application containers report `healthy`. Follow structured logs
-with:
+Wait until all application containers report `healthy`. `kafka-init` must
+report `Exited (0)` because it creates the event topic before the producer and
+consumers start. Follow structured logs with:
 
 ```bash
 docker compose logs -f \
@@ -556,7 +558,21 @@ Restore `AUTH_ACCESS_TOKEN_TTL_SECONDS=60` after load testing.
 
 ### Problem 3: Trust domains, scopes, and refresh
 
-Verify that credentials are not accepted across institutions:
+Start with positive controls to prove that each institutional credential works
+in its own trust domain:
+
+```bash
+curl -sS -o /dev/null -w 'BMKG key at BMKG: HTTP %{http_code}\n' \
+  -H "X-BMKG-Key: ${BMKG_API_KEY}" \
+  'http://localhost:8081/seismic-events?since=1970-01-01T00:00:00Z'
+
+curl -sS -o /dev/null -w 'PVMBG token at PVMBG: HTTP %{http_code}\n' \
+  -H "Authorization: Bearer ${PVMBG_TOKEN}" \
+  'http://localhost:8082/volcanic-reports?since=1970-01-01T00:00:00Z'
+```
+
+Both controls must return HTTP 200. Then exchange the credentials between the
+institutions:
 
 ```bash
 curl -sS -o /dev/null -w 'BMKG key at PVMBG: HTTP %{http_code}\n' \
@@ -568,7 +584,8 @@ curl -sS -o /dev/null -w 'PVMBG token at BMKG: HTTP %{http_code}\n' \
   'http://localhost:8081/seismic-events?since=1970-01-01T00:00:00Z'
 ```
 
-Both requests must return HTTP 401 or 403. Verify Media field enforcement:
+Both cross-domain requests must return HTTP 401 or 403. Next, issue a Media
+token and inspect the server-assigned scope:
 
 ```bash
 MEDIA_TOKEN_RESPONSE="$(
@@ -578,11 +595,20 @@ MEDIA_TOKEN_RESPONSE="$(
 )"
 MEDIA_ACCESS_TOKEN="$(jq -r '.access_token' <<<"$MEDIA_TOKEN_RESPONSE")"
 
+jq '{scope, expires_in}' <<<"$MEDIA_TOKEN_RESPONSE"
+```
+
+The scope must be `hazards:read:summary`. Verify that a normal request contains
+only summary fields and that an explicit raw-field request is rejected by the
+server:
+
+```bash
 curl -fsS \
   -H "Authorization: Bearer ${MEDIA_ACCESS_TOKEN}" \
-  'http://localhost:8080/events?limit=1' | jq '.events[0]'
+  'http://localhost:8080/events?limit=1' \
+  | jq '.events[0]'
 
-curl -i -sS \
+curl -sS -o /dev/null -w 'Media raw-field request: HTTP %{http_code}\n' \
   -H "Authorization: Bearer ${MEDIA_ACCESS_TOKEN}" \
   'http://localhost:8080/events?limit=1&fields=hazard_id,latitude'
 ```
@@ -627,6 +653,7 @@ REFRESH_RESPONSE="$(
 )"
 
 NEW_ACCESS_TOKEN="$(jq -r '.access_token' <<<"$REFRESH_RESPONSE")"
+NEW_REFRESH_TOKEN="$(jq -r '.refresh_token' <<<"$REFRESH_RESPONSE")"
 
 curl -sS -o /dev/null -w 'Refreshed access token: HTTP %{http_code}\n' \
   -H "Authorization: Bearer ${NEW_ACCESS_TOKEN}" \
@@ -637,7 +664,24 @@ curl -sS -o /dev/null -w 'Old access token after refresh: HTTP %{http_code}\n' \
   'http://localhost:8080/events?limit=1'
 ```
 
-The expired token must return 401 and the refreshed token must return 200.
+The expired token must return 401 and the refreshed token must return 200. The
+refresh request still authenticates the machine client, but it does not require
+an end user to log in again. `NEW_REFRESH_TOKEN` replaces the old refresh token
+because refresh sessions are rotated on every use.
+
+Finally, verify the repository secret policy without printing any credential:
+
+```bash
+git check-ignore -q .env && echo PASS || echo FAIL
+test -f .env.example && git ls-files --error-unmatch .env.example >/dev/null \
+  && echo PASS || echo FAIL
+test -z "$(git log main --format='%H' -- .env)" \
+  && echo PASS || echo FAIL
+```
+
+The three commands must print `PASS`: `.env` is ignored, `.env.example` is
+tracked, and `.env` does not appear in the reachable history of `main`. The
+commands check repository state without displaying local secret values.
 
 ### Problem 4: Independent deployment and flexible storage
 
@@ -697,62 +741,171 @@ Both records are served from the same table without a schema migration.
 
 ### Problem 5: Kafka fan-out and consumer catch-up
 
-Check that both independent consumer groups receive events:
+Confirm that topic provisioning completed before checking the event stream:
 
 ```bash
-curl -fsS http://localhost:8085/stats | jq
-curl -fsS http://localhost:8086/stats | jq
-
-docker compose logs --since 2m \
-  aggregator dashboard-consumer notifier-consumer \
-  | grep correlation_id
+docker compose ps -a kafka-init
 ```
 
-Stop Notifier while Dashboard and Aggregator continue:
-
-```bash
-docker compose stop notifier-consumer
-sleep 25
-
-curl -fsS http://localhost:8085/stats | jq
-
-docker compose exec -T kafka \
-  /opt/kafka/bin/kafka-consumer-groups.sh \
-  --bootstrap-server kafka:9092 \
-  --describe \
-  --group "${NOTIFIER_CONSUMER_GROUP}"
-```
-
-Restart Notifier and observe its retained-event catch-up:
-
-```bash
-docker compose start notifier-consumer
-sleep 15
-
-curl -fsS http://localhost:8086/stats | jq
-
-docker compose exec -T kafka \
-  /opt/kafka/bin/kafka-consumer-groups.sh \
-  --bootstrap-server kafka:9092 \
-  --describe \
-  --group "${NOTIFIER_CONSUMER_GROUP}"
-```
-
-Add a third consumer without changing or rebuilding the Aggregator:
+`kafka-init` must report `Exited (0)`. Read one event directly from the Kafka
+topic to prove that the Aggregator publishes through the broker:
 
 ```bash
 docker compose exec -T kafka \
   /opt/kafka/bin/kafka-console-consumer.sh \
   --bootstrap-server kafka:9092 \
   --topic "${KAFKA_TOPIC}" \
-  --group demo-third-consumer \
   --from-beginning \
-  --max-messages 1
+  --max-messages 1 \
+  --timeout-ms 30000
+```
+
+The payload must contain `event_type`, `schema_version`, `correlation_id`, and
+the canonical `HazardEvent` in `data`.
+
+Check that both independent consumer groups have processed events:
+
+```bash
+curl -fsS http://localhost:8085/stats | jq
+curl -fsS http://localhost:8086/stats | jq
+```
+
+Both `processed_count` values must be greater than zero. The following commands
+select one recent correlation ID and show the matching producer, Dashboard, and
+Notifier records:
+
+```bash
+CORRELATION_ID="$(
+  docker compose logs --since 2m --no-log-prefix aggregator \
+    | jq -r 'select(.msg == "hazard_event_published") | .correlation_id' \
+    | tail -n 1
+)"
+
+sleep 1
+
+docker compose logs --since 2m --no-log-prefix \
+  aggregator dashboard-consumer notifier-consumer \
+  | jq -c --arg cid "$CORRELATION_ID" '
+      select(
+        .correlation_id == $cid and
+        (
+          .msg == "hazard_event_published" or
+          .msg == "dashboard_event_applied" or
+          .msg == "notification_delivered"
+        )
+      )
+    '
+```
+
+The output must contain the same correlation ID for all three components. Stop
+Notifier and record the outage start time while Dashboard and Aggregator
+continue:
+
+```bash
+curl -fsS http://localhost:8085/stats | jq
+curl -fsS http://localhost:8086/stats | jq
+
+OUTAGE_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+docker compose stop notifier-consumer
+sleep 25
+
+curl -fsS http://localhost:8085/stats | jq
+
+docker compose logs --since "$OUTAGE_STARTED_AT" aggregator dashboard-consumer \
+  | grep -E 'hazard_event_published|dashboard_event_applied'
+
+docker compose exec -T kafka \
+  /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server kafka:9092 \
+  --describe \
+  --group "${NOTIFIER_CONSUMER_GROUP}"
+```
+
+The Aggregator and Dashboard logs must continue while the Notifier group shows
+positive `LAG`. Restart Notifier and observe its retained-event catch-up:
+
+```bash
+docker compose start notifier-consumer
+sleep 20
+
+curl -fsS http://localhost:8086/health | jq
+curl -fsS http://localhost:8086/stats | jq
+
+docker compose logs --since "$OUTAGE_STARTED_AT" notifier-consumer \
+  | grep -E 'notification_delivered|kafka_commit_completed'
+
+docker compose exec -T kafka \
+  /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server kafka:9092 \
+  --describe \
+  --group "${NOTIFIER_CONSUMER_GROUP}"
+```
+
+The Notifier processes retained events and its lag eventually returns to zero.
+This proves that events published during the outage are caught up rather than
+lost.
+
+Add a third consumer that remains active without changing, rebuilding, or
+restarting the Aggregator:
+
+```bash
+AGGREGATOR_STARTED_BEFORE="$(
+  docker inspect "$(docker compose ps -q aggregator)" \
+    --format '{{.State.StartedAt}}'
+)"
+
+THIRD_CONSUMER_GROUP="demo-third-consumer-$(date +%s)"
+THIRD_CONTAINER="${THIRD_CONSUMER_GROUP}"
+
+docker compose run -d --rm --no-deps \
+  --name "${THIRD_CONTAINER}" \
+  --entrypoint /opt/kafka/bin/kafka-console-consumer.sh \
+  kafka \
+  --bootstrap-server kafka:9092 \
+  --topic "${KAFKA_TOPIC}" \
+  --group "${THIRD_CONSUMER_GROUP}"
+
+sleep 15
+
+docker compose exec -T kafka \
+  /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server kafka:9092 \
+  --describe \
+  --group "${THIRD_CONSUMER_GROUP}" \
+  --members \
+  --verbose
+
+docker logs --tail 1 "${THIRD_CONTAINER}" | jq
+```
+
+The group description must show one active member with assignments for
+`hazard.events.v1`. Verify that the Aggregator process and source code remained
+unchanged:
+
+```bash
+AGGREGATOR_STARTED_AFTER="$(
+  docker inspect "$(docker compose ps -q aggregator)" \
+    --format '{{.State.StartedAt}}'
+)"
+
+[ "${AGGREGATOR_STARTED_BEFORE}" = "${AGGREGATOR_STARTED_AFTER}" ] \
+  && echo PASS || echo FAIL
+
+git diff --quiet --ignore-space-at-eol HEAD -- services/aggregator \
+  && echo PASS || echo FAIL
+```
+
+Both checks must print `PASS`. Stop the demonstration consumer afterward; it
+is removed automatically because it was created with `--rm`:
+
+```bash
+docker stop "${THIRD_CONTAINER}"
 ```
 
 Kafka delivery is at-least-once. Consumers persist their state before manually
-committing offsets and apply idempotency checks so redelivery does not create a
-duplicate domain effect.
+committing offsets. Each consumer records `topic:partition:offset` in the same
+bbolt transaction as its processing result, so a redelivered message does not
+apply the same domain change twice.
 
 ## Observability
 
