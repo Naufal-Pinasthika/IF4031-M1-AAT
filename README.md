@@ -407,11 +407,24 @@ Lapangan token before running these scenarios.
 
 ### Problem 1: Additive schema evolution
 
-Reset PVMBG before the scenario so it starts with schema v1:
+> [!NOTE]
+> For deterministic before-and-after evidence, begin this scenario immediately
+> after the empty-state reset in Quick Start. This prevents records from an
+> earlier schema-v2 demonstration from appearing in the initial sample.
+
+Record the Aggregator start time, then reset only PVMBG so the source starts
+with schema v1. Wait for at least one polling cycle before reading canonical
+events:
 
 ```bash
+AGGREGATOR_STARTED_BEFORE="$(
+  docker inspect "$(docker compose ps -q aggregator)" \
+    --format '{{.State.StartedAt}}'
+)"
+
 docker compose restart pvmbg
 until curl -fsS http://localhost:8082/health >/dev/null; do sleep 1; done
+sleep 7
 
 curl -fsS \
   -H "Authorization: Bearer ${PVMBG_TOKEN}" \
@@ -430,6 +443,31 @@ FIELD_TOKEN_RESPONSE="$(
 FIELD_ACCESS_TOKEN="$(jq -r '.access_token' <<<"$FIELD_TOKEN_RESPONSE")"
 ```
 
+Show that both source schemas have already been mapped to the canonical
+`HazardEvent` contract:
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer ${FIELD_ACCESS_TOKEN}" \
+  'http://localhost:8080/events?source=BMKG&limit=1' \
+  | jq '.events[0] | {
+      hazard_id, source, source_ref_id, hazard_type, severity,
+      area_name, latitude, longitude, occurred_at, attributes
+    }'
+
+curl -fsS \
+  -H "Authorization: Bearer ${FIELD_ACCESS_TOKEN}" \
+  'http://localhost:8080/events?source=PVMBG&limit=1' \
+  | jq '.events[0] | {
+      hazard_id, source, source_ref_id, hazard_type, severity,
+      area_name, latitude, longitude, occurred_at, attributes
+    }'
+```
+
+The BMKG event must use `SEISMIC`, the BMKG region and coordinates, and the
+required seismic attributes. The PVMBG event must use `VOLCANIC`, the mapped
+volcano name and coordinates, and the required volcanic attributes.
+
 Trigger the additive schema change without restarting any service:
 
 ```bash
@@ -445,10 +483,22 @@ curl -fsS \
   -H 'X-Correlation-ID: demo-problem-1-read' \
   'http://localhost:8080/events?source=PVMBG&limit=100' \
   | jq '[.events[] | select(.attributes.confidence_level != null)][0]'
+
+AGGREGATOR_STARTED_AFTER="$(
+  docker inspect "$(docker compose ps -q aggregator)" \
+    --format '{{.State.StartedAt}}'
+)"
+
+[ "${AGGREGATOR_STARTED_BEFORE}" = "${AGGREGATOR_STARTED_AFTER}" ] \
+  && echo PASS || echo FAIL
 ```
 
 The resulting event must retain its canonical name and coordinates while
-placing `confidence_level` in `attributes`.
+placing `confidence_level` in `attributes`. The final comparison must print
+`PASS`, proving that the Aggregator handled the additive change without a
+restart or redeploy. The declared policy is additive-only: unknown fields are
+preserved in `attributes`. Removal of required fields, incompatible type
+changes, and semantic changes to existing fields are not supported.
 
 > [!WARNING]
 > `/admin/schema-version` is a toggle. Calling it a second time disables schema
@@ -503,9 +553,69 @@ PVMBG_LOAD_PID=$!
 wait "$BMKG_LOAD_PID" "$PVMBG_LOAD_PID"
 ```
 
-Record throughput, p50/p95/p99, non-429 errors, and HTTP 429 responses from
-`/tmp/bmkg-load.txt` and `/tmp/pvmbg-load.txt`. Issue another fresh token
-before testing outage recovery:
+Print throughput, p50/p95/p99, and the HTTP status distribution from both
+results:
+
+```bash
+for result in /tmp/bmkg-load.txt /tmp/pvmbg-load.txt; do
+  echo "=== ${result} ==="
+  grep -E 'Requests/sec:|50%+ in|95%+ in|99%+ in|^[[:space:]]+\[[0-9]{3}\]' "${result}"
+done
+
+BMKG_P95_SECONDS="$(
+  awk '$1 ~ /^95%+$/ && $2 == "in" {print $3; exit}' /tmp/bmkg-load.txt
+)"
+
+awk -v p95="${BMKG_P95_SECONDS}" 'BEGIN {
+  printf "BMKG p95: %.6f seconds, %s\n", p95, (p95 < 0.300 ? "PASS" : "FAIL")
+  exit !(p95 < 0.300)
+}'
+```
+
+The last command must print `PASS`. Calculate the combined uncontrolled error
+rate across both result files. HTTP 429 is counted separately as a controlled
+rejection; every other non-200 response and transport error is uncontrolled:
+
+```bash
+read -r TOTAL_ATTEMPTS CONTROLLED_429 UNCONTROLLED_ERRORS < <(
+  awk '
+    /^Status code distribution:/ {section = "status"; next}
+    /^Error distribution:/       {section = "error"; next}
+
+    section == "status" && $1 ~ /^\[[0-9][0-9][0-9]\]$/ {
+      code = $1
+      gsub(/[\[\]]/, "", code)
+      total += $2
+      if (code == 429) controlled += $2
+      else if (code != 200) uncontrolled += $2
+    }
+
+    section == "error" && $1 ~ /^\[[0-9]+\]$/ {
+      count = $1
+      gsub(/[\[\]]/, "", count)
+      total += count
+      uncontrolled += count
+    }
+
+    END {print total + 0, controlled + 0, uncontrolled + 0}
+  ' /tmp/bmkg-load.txt /tmp/pvmbg-load.txt
+)
+
+awk \
+  -v total="${TOTAL_ATTEMPTS}" \
+  -v rejected="${CONTROLLED_429}" \
+  -v error_count="${UNCONTROLLED_ERRORS}" \
+  'BEGIN {
+    rate = 100
+    if (total > 0) rate = error_count * 100 / total
+    printf "attempts=%d controlled_429=%d uncontrolled_errors=%d error_rate=%.4f%% %s\n",
+      total, rejected, error_count, rate, (rate < 1 ? "PASS" : "FAIL")
+    exit !(rate < 1)
+  }'
+```
+
+The combined uncontrolled error rate must be below one percent. Issue another
+fresh token before testing outage recovery:
 
 ```bash
 FIELD_TOKEN_RESPONSE="$(
@@ -554,7 +664,22 @@ curl -fsS \
 > `/admin/outage` is also a toggle. Ensure the first response says
 > `outage_enabled: true` and the recovery response says `false`.
 
-Restore `AUTH_ACCESS_TOKEN_TTL_SECONDS=60` after load testing.
+Restore the normal delay range and the default access-token TTL after load
+testing:
+
+```bash
+sed -i 's/^PVMBG_DELAY_MIN_MS=.*/PVMBG_DELAY_MIN_MS=500/' .env
+sed -i 's/^PVMBG_DELAY_MAX_MS=.*/PVMBG_DELAY_MAX_MS=3000/' .env
+sed -i 's/^AUTH_ACCESS_TOKEN_TTL_SECONDS=.*/AUTH_ACCESS_TOKEN_TTL_SECONDS=60/' .env
+
+set -a
+source <(sed 's/\r$//' .env)
+set +a
+
+docker compose up -d --force-recreate pvmbg auth
+until curl -fsS http://localhost:8082/health >/dev/null; do sleep 1; done
+until curl -fsS http://localhost:8084/health >/dev/null; do sleep 1; done
+```
 
 ### Problem 3: Trust domains, scopes, and refresh
 
@@ -696,7 +821,27 @@ FIELD_TOKEN_RESPONSE="$(
 FIELD_ACCESS_TOKEN="$(jq -r '.access_token' <<<"$FIELD_TOKEN_RESPONSE")"
 ```
 
-Stop and rebuild only the Notifier Consumer while unrelated reads continue:
+Record the start time of every long-running container except the Notifier:
+
+```bash
+P4_UNRELATED_SERVICES=(
+  postgres auth-postgres bmkg pvmbg kafka aggregator auth
+  client-api dashboard-consumer
+)
+
+record_started_at() {
+  for service in "${P4_UNRELATED_SERVICES[@]}"; do
+    printf '%s ' "${service}"
+    docker inspect "$(docker compose ps -q "${service}")" \
+      --format '{{.State.StartedAt}}'
+  done
+}
+
+record_started_at > /tmp/p4-started-before.txt
+```
+
+Stop and rebuild only the Notifier Consumer while an unrelated Client API read
+continues to succeed:
 
 ```bash
 docker compose stop notifier-consumer
@@ -707,37 +852,126 @@ curl -fsS \
 
 docker compose build notifier-consumer
 docker compose up -d notifier-consumer
-docker compose ps
+until curl -fsS http://localhost:8086/health >/dev/null; do sleep 1; done
+
+record_started_at > /tmp/p4-started-after.txt
+diff -u /tmp/p4-started-before.txt /tmp/p4-started-after.txt \
+  && echo PASS || echo FAIL
 ```
 
-Inspect storage-network ownership:
+The final command must print `PASS`, proving that the unrelated containers were
+not restarted. Issue a fresh token in case the rebuild consumed the previous
+token's 60-second TTL, then inspect and assert storage-network ownership:
 
 ```bash
-docker inspect "$(docker compose ps -q postgres)" \
-  --format '{{json .NetworkSettings.Networks}}' | jq
+FIELD_TOKEN_RESPONSE="$(
+  curl -fsS -X POST \
+    -u "${FIELD_CLIENT_ID}:${FIELD_CLIENT_SECRET}" \
+    http://localhost:8084/v1/token
+)"
+FIELD_ACCESS_TOKEN="$(jq -r '.access_token' <<<"$FIELD_TOKEN_RESPONSE")"
 
-docker inspect "$(docker compose ps -q aggregator)" \
-  --format '{{json .NetworkSettings.Networks}}' | jq
+DATABASE_NETWORK="$(
+  docker inspect "$(docker compose ps -q postgres)" \
+    --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}' \
+    | grep '_database$'
+)"
 
-docker inspect "$(docker compose ps -q client-api)" \
-  --format '{{json .NetworkSettings.Networks}}' | jq
+AGGREGATOR_NETWORKS="$(
+  docker inspect "$(docker compose ps -q aggregator)" \
+    --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}'
+)"
+
+CLIENT_API_NETWORKS="$(
+  docker inspect "$(docker compose ps -q client-api)" \
+    --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}'
+)"
+
+grep -qx "${DATABASE_NETWORK}" <<<"${AGGREGATOR_NETWORKS}" \
+  && echo 'PASS: Aggregator can access the Canonical Store' \
+  || echo 'FAIL: Aggregator is outside the database network'
+
+if grep -qx "${DATABASE_NETWORK}" <<<"${CLIENT_API_NETWORKS}"; then
+  echo 'FAIL: Client API can access the database network'
+else
+  echo 'PASS: Client API is isolated from the database network'
+fi
+
+curl -fsS \
+  -H "Authorization: Bearer ${FIELD_ACCESS_TOKEN}" \
+  'http://localhost:8080/events?limit=1' | jq '.events[0]'
 ```
 
 PostgreSQL and Aggregator share the private `database` network; Client API does
-not. To show flexible JSONB storage, query up to 100 PVMBG events after the
-Problem 1 schema change:
+not. The successful Client API request shows that the read passes through the
+Aggregator API rather than through a shared database connection. To show
+flexible JSONB storage independently of earlier scenarios, restart PVMBG in
+schema v1 and wait for a new v1 record to be stored:
 
 ```bash
-curl -fsS \
-  -H "Authorization: Bearer ${FIELD_ACCESS_TOKEN}" \
-  'http://localhost:8080/events?source=PVMBG&limit=100' \
-  | jq '{
-      before: ([.events[] | select(.attributes.confidence_level == null)][0]),
-      after:  ([.events[] | select(.attributes.confidence_level != null)][0])
-    }'
+docker compose restart pvmbg
+until curl -fsS http://localhost:8082/health >/dev/null; do sleep 1; done
+sleep 20
+
+FIELD_TOKEN_RESPONSE="$(
+  curl -fsS -X POST \
+    -u "${FIELD_CLIENT_ID}:${FIELD_CLIENT_SECRET}" \
+    http://localhost:8084/v1/token
+)"
+FIELD_ACCESS_TOKEN="$(jq -r '.access_token' <<<"$FIELD_TOKEN_RESPONSE")"
+
+PVMBG_V1_RESPONSE="$(
+  curl -fsS \
+    -H "Authorization: Bearer ${FIELD_ACCESS_TOKEN}" \
+    'http://localhost:8080/events?source=PVMBG&limit=100'
+)"
+
+jq -e \
+  '[.events[] | select(.attributes.confidence_level == null)] | length > 0' \
+  >/dev/null <<<"${PVMBG_V1_RESPONSE}" \
+  && echo PASS || echo FAIL
 ```
 
-Both records are served from the same table without a schema migration.
+The check must print `PASS`. Enable schema v2 without restarting the
+Aggregator, wait for a new v2 record, and issue a fresh token before reading
+both versions:
+
+```bash
+curl -fsS -X POST \
+  -H "Authorization: Bearer ${PVMBG_TOKEN}" \
+  http://localhost:8082/admin/schema-version \
+  | jq -e '.schema_v2_enabled == true'
+
+sleep 20
+
+FIELD_TOKEN_RESPONSE="$(
+  curl -fsS -X POST \
+    -u "${FIELD_CLIENT_ID}:${FIELD_CLIENT_SECRET}" \
+    http://localhost:8084/v1/token
+)"
+FIELD_ACCESS_TOKEN="$(jq -r '.access_token' <<<"$FIELD_TOKEN_RESPONSE")"
+
+PVMBG_SCHEMA_RESPONSE="$(
+  curl -fsS \
+    -H "Authorization: Bearer ${FIELD_ACCESS_TOKEN}" \
+    'http://localhost:8080/events?source=PVMBG&limit=100'
+)"
+
+jq '{
+    before: ([.events[] | select(.attributes.confidence_level == null)][0]),
+    after:  ([.events[] | select(.attributes.confidence_level != null)][0])
+  }' <<<"${PVMBG_SCHEMA_RESPONSE}"
+
+jq -e '
+    ([.events[] | select(.attributes.confidence_level == null)] | length > 0)
+    and
+    ([.events[] | select(.attributes.confidence_level != null)] | length > 0)
+  ' >/dev/null <<<"${PVMBG_SCHEMA_RESPONSE}" \
+  && echo PASS || echo FAIL
+```
+
+The final command must print `PASS`. Both records are served through the same
+API and from the same table without a schema migration.
 
 ### Problem 5: Kafka fan-out and consumer catch-up
 
