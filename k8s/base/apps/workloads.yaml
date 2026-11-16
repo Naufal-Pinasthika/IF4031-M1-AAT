@@ -1,0 +1,541 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: bmkg
+spec:
+  selector:
+    app: bmkg
+  ports:
+  - name: http
+    port: 8081
+    targetPort: 8081
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bmkg
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bmkg
+  template:
+    metadata:
+      labels:
+        app: bmkg
+        role: mock
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: bmkg
+        image: bnpb/bmkg:m2-dev
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: bmkg-config
+        - secretRef:
+            name: bmkg-credentials
+        ports:
+        - name: http
+          containerPort: 8081
+        resources:
+          requests:
+            memory: 64Mi
+          limits:
+            memory: 128Mi
+        startupProbe:
+          tcpSocket:
+            port: 8081
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 8081
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pvmbg
+spec:
+  selector:
+    app: pvmbg
+  ports:
+  - name: http
+    port: 8082
+    targetPort: 8082
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pvmbg
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pvmbg
+  template:
+    metadata:
+      labels:
+        app: pvmbg
+        role: mock
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: pvmbg
+        image: bnpb/pvmbg:m2-dev
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: pvmbg-config
+        - secretRef:
+            name: pvmbg-credentials
+        ports:
+        - name: http
+          containerPort: 8082
+        resources:
+          requests:
+            memory: 64Mi
+          limits:
+            memory: 128Mi
+        startupProbe:
+          tcpSocket:
+            port: 8082
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 8082
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aggregator
+spec:
+  selector:
+    app: aggregator
+  ports:
+  - name: http
+    port: 8083
+    targetPort: 8083
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aggregator
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: aggregator
+  template:
+    metadata:
+      labels:
+        app: aggregator
+        role: aggregator
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: aggregator
+        image: bnpb/aggregator:m2-dev
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: aggregator-config
+        - secretRef:
+            name: aggregator-credentials
+        ports:
+        - name: http
+          containerPort: 8083
+        resources:
+          requests:
+            memory: 256Mi
+          limits:
+            memory: 512Mi
+        startupProbe:
+          tcpSocket:
+            port: 8083
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 8083
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: wait-for-database
+        image: postgres:16-alpine
+        command:
+        - sh
+        - -ec
+        - until pg_isready -h postgres -p 5432 -U postgres; do sleep 2; done
+        resources:
+          requests:
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: aggregator
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+spec:
+  selector:
+    app: auth
+  ports:
+  - name: http
+    port: 8084
+    targetPort: 8084
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: auth
+  template:
+    metadata:
+      labels:
+        app: auth
+        role: api
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: auth
+        image: bnpb/auth:m2-dev
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: auth-config
+        - secretRef:
+            name: auth-credentials
+        ports:
+        - name: http
+          containerPort: 8084
+        resources:
+          requests:
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+        startupProbe:
+          tcpSocket:
+            port: 8084
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 8084
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+      initContainers:
+      - name: wait-for-database
+        image: postgres:16-alpine
+        command:
+        - sh
+        - -ec
+        - until pg_isready -h auth-postgres -p 5432 -U auth_app; do sleep 2; done
+        resources:
+          requests:
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: client-api
+spec:
+  selector:
+    app: client-api
+  ports:
+  - name: http
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: client-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: client-api
+  template:
+    metadata:
+      labels:
+        app: client-api
+        role: api
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: client-api
+        image: bnpb/client-api:m2-dev
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: client-api-config
+        - secretRef:
+            name: client-api-credentials
+        ports:
+        - name: http
+          containerPort: 8080
+        resources:
+          requests:
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+        startupProbe:
+          tcpSocket:
+            port: 8080
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 8080
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-consumer
+spec:
+  selector:
+    app: dashboard-consumer
+  ports:
+  - name: http
+    port: 8085
+    targetPort: 8085
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: dashboard-consumer
+spec:
+  serviceName: dashboard-consumer
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard-consumer
+  template:
+    metadata:
+      labels:
+        app: dashboard-consumer
+        role: consumer
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: dashboard-consumer
+        image: bnpb/dashboard-consumer:m2-dev
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: dashboard-consumer-config
+        ports:
+        - name: http
+          containerPort: 8085
+        resources:
+          requests:
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+        startupProbe:
+          tcpSocket:
+            port: 8085
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 8085
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notifier-consumer
+spec:
+  selector:
+    app: notifier-consumer
+  ports:
+  - name: http
+    port: 8086
+    targetPort: 8086
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: notifier-consumer
+spec:
+  serviceName: notifier-consumer
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notifier-consumer
+  template:
+    metadata:
+      labels:
+        app: notifier-consumer
+        role: consumer
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: notifier-consumer
+        image: bnpb/notifier-consumer:m2-dev
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: notifier-consumer-config
+        ports:
+        - name: http
+          containerPort: 8086
+        resources:
+          requests:
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+        startupProbe:
+          tcpSocket:
+            port: 8086
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 60
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: 8086
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+        volumeMounts:
+        - name: data
+          mountPath: /data
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 1Gi
