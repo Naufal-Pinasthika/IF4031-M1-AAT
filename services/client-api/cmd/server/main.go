@@ -80,6 +80,9 @@ func main() {
 	mux.HandleFunc("GET /events/{id}", server.protect(func(w http.ResponseWriter, r *http.Request) {
 		server.forwardEvents(w, r, "/internal/events/"+url.PathEscape(r.PathValue("id")), true)
 	}))
+	// p1
+	mux.HandleFunc("GET /dashboard", serveDashboard)
+	mux.HandleFunc("GET /analytics", server.protect(server.forwardAnalytics))
 	mux.HandleFunc("GET /source-status", server.protect(func(w http.ResponseWriter, r *http.Request) {
 		if !hasScope(claimsFromContext(r.Context()).Scope, scopeSummary) {
 			writeBearerError(w, http.StatusForbidden, "insufficient_scope", "summary scope is required", scopeSummary)
@@ -93,7 +96,7 @@ func main() {
 		Handler:           loggingMiddleware(logger, mux),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		WriteTimeout:      35 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	logger.Info("client_api_server_started", "address", ":8080")
@@ -108,7 +111,8 @@ func newAggregatorClient(maxInFlight int) *http.Client {
 	transport.MaxIdleConns = maxInFlight
 	transport.MaxIdleConnsPerHost = maxInFlight
 	transport.MaxConnsPerHost = maxInFlight
-	return &http.Client{Transport: transport, Timeout: 3 * time.Second}
+	// p1: analytical scans can span several canonical pages.
+	return &http.Client{Transport: transport, Timeout: 30 * time.Second}
 }
 
 func (s *Server) protect(next http.HandlerFunc) http.HandlerFunc {
@@ -150,6 +154,7 @@ func (s *Server) forwardRaw(w http.ResponseWriter, r *http.Request, path string)
 	s.logAggregatorDone(r, response.StatusCode, startedAt)
 }
 
+// p1
 func (s *Server) forwardEvents(w http.ResponseWriter, r *http.Request, path string, single bool) {
 	claims := claimsFromContext(r.Context())
 	fields, err := selectFields(r.URL.Query().Get("fields"), claims.Scope)
@@ -200,8 +205,13 @@ func (s *Server) forwardEvents(w http.ResponseWriter, r *http.Request, path stri
 			writeError(w, http.StatusBadGateway, "invalid aggregator response")
 			return
 		}
+		var projected any
+		if envelope.Event != nil {
+			projected = projectEvent(*envelope.Event, fields)
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"event":         projectEvent(envelope.Event, fields),
+			"partial": envelope.Partial, "unavailable_units": envelope.UnavailableUnits,
+			"event":         projected,
 			"source_status": envelope.SourceStatus,
 		})
 	} else {
@@ -215,7 +225,7 @@ func (s *Server) forwardEvents(w http.ResponseWriter, r *http.Request, path stri
 		for _, event := range envelope.Events {
 			projected = append(projected, projectEvent(event, fields))
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"events": projected, "sources": envelope.Sources})
+		writeJSON(w, http.StatusOK, map[string]any{"events": projected, "sources": envelope.Sources, "partial": envelope.Partial, "unavailable_units": envelope.UnavailableUnits, "next_cursor": envelope.NextCursor})
 	}
 	s.logAggregatorDone(r, response.StatusCode, startedAt)
 }
