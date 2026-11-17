@@ -12,9 +12,12 @@ import (
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/correlation"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/status"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/store"
 )
 
+// p1 delayed tsunami warnings look up the already persisted parent quake.
 type EventStore interface {
+	GetEventBySourceRef(context.Context, string, string) (store.EventLookup, error) // p1
 	Upsert(ctx context.Context, event *model.HazardEvent) error
 }
 
@@ -146,6 +149,7 @@ func volcanicReportsAfter(reports []VolcanicReport, since time.Time) []VolcanicR
 	return filtered
 }
 
+// p1
 func (a *Aggregator) processBMKG(ctx context.Context, batch BMKGBatch) error {
 	warningsByEventID := make(map[string]*TsunamiWarning)
 
@@ -165,6 +169,37 @@ func (a *Aggregator) processBMKG(ctx context.Context, batch BMKGBatch) error {
 			return err
 		}
 		if err := a.publish(operationCtx, hazard, batch.CorrelationID); err != nil {
+			return err
+		}
+	}
+
+	// p1 preserve each warning identity, including warnings arriving after the quake batch
+	for _, warning := range batch.Warnings {
+		lookup, err := a.store.GetEventBySourceRef(ctx, "BMKG", warning.RelatedEventID)
+		if err != nil {
+			return err
+		}
+		if lookup.Event == nil {
+			return fmt.Errorf("parent quake for warning %s is unavailable", warning.WarningID)
+		}
+		parent := lookup.Event
+		hazard := model.HazardEvent{Source: model.SourceBMKG, SourceRefID: warning.WarningID, HazardType: model.HazardTypeTSUNAMI, AreaName: parent.AreaName, Latitude: parent.Latitude, Longitude: parent.Longitude, OccuredAt: parent.OccuredAt,
+			Attributes: map[string]any{"warning_id": warning.WarningID, "related_event_id": warning.RelatedEventID, "threat_level": warning.ThreatLevel, "affected_zones": warning.AffectedZones, "estimated_arrival": warning.EstimatedArrival}}
+		switch warning.ThreatLevel {
+		case ThreatAwas:
+			hazard.Severity = model.SeverityAWAS
+		case ThreatSiaga:
+			hazard.Severity = model.SeveritySIAGA
+		case ThreatWaspada:
+			hazard.Severity = model.SeverityWASPADA
+		default:
+			return fmt.Errorf("unknown tsunami threat level")
+		}
+		operationCtx := correlation.WithID(ctx, batch.CorrelationID)
+		if err = a.store.Upsert(operationCtx, &hazard); err != nil {
+			return err
+		}
+		if err = a.publish(operationCtx, hazard, batch.CorrelationID); err != nil {
 			return err
 		}
 	}

@@ -8,7 +8,15 @@ import (
 	"time"
 )
 
+// p1 storage endpoints names
+type StorageUnit struct{ Name, DatabaseURL string }
+
+// p1
 type Config struct {
+	StorageUnits    []StorageUnit
+	StoreTimeout    time.Duration
+	AuditToken      string
+	ImportOnly      bool
 	ListenAddress   string
 	DatabaseURL     string
 	KafkaBrokers    []string
@@ -23,6 +31,7 @@ type Config struct {
 	StartSince      time.Time
 }
 
+// p1
 func Load() (Config, error) {
 	pollingInterval, err := durationFromEnv("AGGREGATOR_POLL_INTERVAL_MS", 5000)
 	if err != nil {
@@ -37,8 +46,29 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
-	if databaseURL == "" {
-		return Config{}, fmt.Errorf("DATABASE_URL is required")
+	// p1 three units or explicit single-database compatibility.
+	units := make([]StorageUnit, 0, 3)
+	for i, key := range []string{"P1_STORAGE_A_URL", "P1_STORAGE_B_URL", "P1_STORAGE_C_URL"} {
+		if url := strings.TrimSpace(os.Getenv(key)); url != "" {
+			units = append(units, StorageUnit{Name: "store-" + string(rune('a'+i)), DatabaseURL: url})
+		}
+	}
+	if len(units) > 0 && len(units) != 3 {
+		return Config{}, fmt.Errorf("all three P1_STORAGE_*_URL values are required")
+	}
+	if len(units) == 0 {
+		if databaseURL == "" {
+			return Config{}, fmt.Errorf("DATABASE_URL or three P1 storage URLs are required")
+		}
+		units = append(units, StorageUnit{Name: "store-a", DatabaseURL: databaseURL})
+	}
+	timeout, err := durationFromEnv("P1_STORE_TIMEOUT_MS", 500)
+	if err != nil {
+		return Config{}, err
+	}
+	importOnly, err := strconv.ParseBool(envOrDefault("P1_IMPORT_ONLY", "false"))
+	if err != nil {
+		return Config{}, fmt.Errorf("P1_IMPORT_ONLY must be boolean")
 	}
 
 	startSince := time.Unix(0, 0).UTC()
@@ -50,6 +80,7 @@ func Load() (Config, error) {
 	}
 
 	return Config{
+		StorageUnits: units, StoreTimeout: timeout, AuditToken: os.Getenv("P1_AUDIT_TOKEN"), ImportOnly: importOnly,
 		ListenAddress:   envOrDefault("AGGREGATOR_LISTEN_ADDRESS", ":8083"),
 		DatabaseURL:     databaseURL,
 		KafkaBrokers:    splitCommaSeparated(os.Getenv("KAFKA_BROKERS"), "localhost:9092"),

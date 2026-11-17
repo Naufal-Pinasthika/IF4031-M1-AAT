@@ -3,18 +3,19 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
-	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/status"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/store"
 )
 
+// p1
 type EventReader interface {
-	ListEvents(context.Context, store.EventFilter) ([]model.HazardEvent, error)
-	GetEventByID(context.Context, string) (*model.HazardEvent, error)
+	ListEvents(context.Context, store.EventFilter) (store.EventPage, error)
+	GetEventByID(context.Context, string) (store.EventLookup, error)
 }
 
 type Handler struct {
@@ -30,6 +31,7 @@ func GetHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// p1
 func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	filter := store.EventFilter{
@@ -37,6 +39,7 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		HazardType: query.Get("hazard_type"),
 		Severity:   query.Get("severity"),
 		Limit:      50,
+		Cursor:     query.Get("cursor"),
 	}
 
 	var err error
@@ -63,37 +66,44 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if raw := query.Get("offset"); raw != "" {
 		filter.Offset, err = strconv.Atoi(raw)
-		if err != nil || filter.Offset < 0 {
-			writeError(w, http.StatusBadRequest, "offset must be zero or greater")
+		if err != nil || filter.Offset < 0 || filter.Offset > 100000 {
+			writeError(w, http.StatusBadRequest, "offset must be between 0 and 100000")
 			return
 		}
 	}
 
-	events, err := h.reader.ListEvents(r.Context(), filter)
+	page, err := h.reader.ListEvents(r.Context(), filter)
 	if err != nil {
+		if errors.Is(err, store.ErrInvalidCursor) {
+			writeError(w, http.StatusBadRequest, "invalid cursor")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to load hazard events")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"events":  events,
+		"events":  page.Events,
+		"partial": page.Partial, "unavailable_units": page.UnavailableUnits, "next_cursor": page.NextCursor,
 		"sources": h.sourceStatuses(filter.Source),
 	})
 }
 
+// p1
 func (h *Handler) GetEventByID(w http.ResponseWriter, r *http.Request) {
-	event, err := h.reader.GetEventByID(r.Context(), r.PathValue("id"))
+	lookup, err := h.reader.GetEventByID(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load hazard event")
 		return
 	}
-	if event == nil {
+	if lookup.Event == nil && !lookup.Partial {
 		writeError(w, http.StatusNotFound, "hazard event not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"event":         event,
-		"source_status": h.tracker.Snapshot(string(event.Source)),
-	})
+	var sourceStatus any
+	if lookup.Event != nil {
+		sourceStatus = h.tracker.Snapshot(string(lookup.Event.Source))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"event": lookup.Event, "source_status": sourceStatus, "partial": lookup.Partial, "unavailable_units": lookup.UnavailableUnits})
 }
 
 func (h *Handler) GetSourceStatus(w http.ResponseWriter, r *http.Request) {
