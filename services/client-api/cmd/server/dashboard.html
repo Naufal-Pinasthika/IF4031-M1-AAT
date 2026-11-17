@@ -1,0 +1,39 @@
+<!doctype html>
+<!-- p1: browser analytics uses the authorized Client API, without embedded secrets. -->
+<html lang="id">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BNPB · Analitik Bencana</title>
+<style>
+:root{font:16px system-ui,sans-serif;color:#162f46;background:#edf2f5}*{box-sizing:border-box}body{max-width:1180px;margin:auto;padding:28px}header{border-bottom:3px solid #df6b36;padding-bottom:18px}h1{font-size:30px;margin:4px 0}h2{font-size:20px;margin-top:0}.sub{color:#52687b}section{background:white;border:1px solid #d4dfe7;border-radius:8px;padding:22px;margin-top:20px}form{display:flex;gap:14px;align-items:end;flex-wrap:wrap}label{display:grid;gap:5px;font-size:14px}input,button{font:inherit;padding:9px;border:1px solid #a1b3c1;border-radius:4px}input[type=password]{width:300px;max-width:100%}button{background:#194d70;color:white;cursor:pointer}button:disabled{opacity:.6}#status{padding:14px;margin-top:18px;background:#e1eaf0;border-left:5px solid #697e90}#status.warn{background:#fff0cd;border-color:#c45c00;color:#6c3600}#status.ok{background:#e1f3eb;border-color:#287450}#legend{display:flex;flex-wrap:wrap;gap:18px;font-size:14px}.swatch{display:inline-block;width:14px;height:4px;margin-right:6px;vertical-align:middle}svg{width:100%;height:auto;min-height:200px}text{font:12px system-ui;fill:#52687b}.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}.grid section{min-width:0}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:9px;border-bottom:1px solid #e2e9ee}th:last-child,td:last-child{text-align:right}.scroll{max-height:360px;overflow:auto}#total{font-size:27px;font-weight:700}@media(max-width:700px){.grid{grid-template-columns:1fr}body{padding:16px}}
+</style>
+<header><p class="sub">BNPB / SISTEM INFORMASI KEBENCANAAN</p><h1>Analitik kejadian bencana</h1><div class="sub">Seluruh lokasi penyimpanan · Waktu UTC · Setiap event dihitung satu kali</div></header>
+<section><form id="controls"><label>Access token Client API<input id="token" type="password" autocomplete="off" required placeholder="Token dengan hazards:read:summary"></label><label>Dari tanggal UTC<input id="from" type="date"></label><label>Sampai tanggal UTC<input id="to" type="date"></label><button id="load">Tampilkan</button></form><p class="sub">Token hanya disimpan di memori halaman. Gunakan access token baru jika sesi kedaluwarsa.</p></section>
+<div id="status" role="status" aria-live="polite">Belum ada data. Masukkan token untuk memuat analitik.</div>
+<section><h2>Jumlah kejadian <span id="total">—</span></h2><p class="sub" id="updated">—</p><div id="legend"></div><svg id="chart" viewBox="0 0 1000 320" role="img" aria-label="Jumlah kejadian harian per jenis bahaya"></svg></section>
+<div class="grid"><section><h2>Jumlah per tingkat severity</h2><table><thead><tr><th>Severity</th><th>Kejadian</th></tr></thead><tbody id="severity"></tbody></table></section><section><h2>Jumlah per wilayah</h2><div class="scroll"><table><thead><tr><th>Wilayah</th><th>Kejadian</th></tr></thead><tbody id="areas"></tbody></table></div></section></div>
+<script>
+// p1: DOM text nodes keep source area names out of executable HTML.
+const $ = id => document.getElementById(id);
+const types = ['SEISMIC','TSUNAMI','VOLCANIC','WILDFIRE','COASTAL'];
+const names = ['Gempa','Tsunami','Gunung berapi','Kebakaran hutan','Pesisir'];
+const colors = ['#1261a0','#843ba5','#c54e26','#b18a00','#168071'];
+for(let i=0;i<types.length;i++){const label=document.createElement('span'),swatch=document.createElement('span');swatch.className='swatch';swatch.style.background=colors[i];label.append(swatch,document.createTextNode(names[i]));$('legend').append(label);}
+// p1
+function table(id,counts){const target=$(id);target.replaceChildren();for(const [name,count] of Object.entries(counts).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]))){const tr=document.createElement('tr');for(const value of [name,count]){const td=document.createElement('td');td.textContent=String(value);tr.append(td);}target.append(tr);}}
+// p1
+function svgElement(tag,attrs,text){const node=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [key,value]of Object.entries(attrs))node.setAttribute(key,String(value));if(text!==undefined)node.textContent=text;return node;}
+// p1: fill missing UTC days with zeros; server supplies only occupied daily buckets.
+function draw(daily){const svg=$('chart');svg.replaceChildren();if(!daily.length){svg.append(svgElement('text',{x:60,y:150},'Tidak ada kejadian pada rentang ini.'));return;}
+ const byDate=new Map(daily.map(d=>[d.date,d.counts]));const first=Date.parse(daily[0].date+'T00:00:00Z'),last=Date.parse(daily[daily.length-1].date+'T00:00:00Z');const days=[];for(let t=first;t<=last;t+=86400000){const date=new Date(t).toISOString().slice(0,10);days.push({date,counts:byDate.get(date)||{}});}
+ const max=Math.max(1,...daily.flatMap(d=>types.map(type=>d.counts[type]||0)));const x=i=>60+i*900/Math.max(1,days.length-1),y=n=>270-n*230/max;
+ for(let i=0;i<=4;i++){const value=max*i/4;svg.append(svgElement('line',{x1:60,y1:y(value),x2:960,y2:y(value),stroke:'#dfe7ed'}),svgElement('text',{x:50,y:y(value)+4,'text-anchor':'end'},value.toFixed(value%1?1:0)));}
+ for(let k=0;k<types.length;k++){svg.append(svgElement('polyline',{points:days.map((d,i)=>`${x(i)},${y(d.counts[types[k]]||0)}`).join(' '),fill:'none',stroke:colors[k],'stroke-width':2}));if(days.length===1)svg.append(svgElement('circle',{cx:x(0),cy:y(days[0].counts[types[k]]||0),r:4,fill:colors[k]}));}
+ for(const i of [...new Set([0,Math.floor((days.length-1)/2),days.length-1])])svg.append(svgElement('text',{x:x(i),y:300,'text-anchor':i===0?'start':i===days.length-1?'end':'middle'},days[i].date));
+}
+// p1: a failed fetch leaves previous values visibly marked as stale, never converted to zeros.
+$('controls').addEventListener('submit',async event=>{event.preventDefault();$('load').disabled=true;const status=$('status');status.className='warn';status.textContent='Memuat data; angka sebelumnya belum diperbarui.';
+ try{const params=new URLSearchParams();if($('from').value)params.set('from',$('from').value+'T00:00:00Z');if($('to').value)params.set('to',$('to').value+'T23:59:59.999999999Z');const response=await fetch('/analytics?'+params,{headers:{Authorization:'Bearer '+$('token').value.trim()},cache:'no-store',signal:AbortSignal.timeout(30000)});if(!response.ok)throw new Error('HTTP '+response.status);const data=await response.json();if(!Array.isArray(data.daily)||!data.by_severity||!data.by_area||typeof data.partial!=='boolean')throw new Error('Respons analitik tidak valid');
+ $('total').textContent=data.total;$('updated').textContent='Diperbarui '+new Date().toISOString()+' · Angka dapat berubah selama ingestion berjalan.';table('severity',data.by_severity);table('areas',data.by_area);draw(data.daily);status.className=data.partial?'warn':'ok';status.textContent=data.partial?'PERINGATAN: penyimpanan degraded; angka mungkin belum lengkap. Unit tidak tersedia/pulih: '+(data.unavailable_units||[]).join(', '):'Seluruh unit penyimpanan tersedia.';
+ }catch(error){status.className='warn';status.textContent='Gagal memuat analitik ('+error.message+'). Angka yang masih tampil adalah hasil sebelumnya, bukan data terkini.';}finally{$('load').disabled=false;}});
+</script>
+</html>

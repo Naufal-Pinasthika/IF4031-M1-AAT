@@ -30,7 +30,8 @@ func main() {
 	client := aggregator.NewClient(cfg.HTTPTimeout, logger)
 	poller := aggregator.New(client, cfg, logger)
 	startupCtx := correlation.WithID(context.Background(), "startup")
-	eventStore, err := store.New(startupCtx, cfg.DatabaseURL, logger)
+	// p1: routing and bounded I/O across storage units.
+	eventStore, err := store.New(startupCtx, cfg.StorageUnits, cfg.StoreTimeout, logger)
 	if err != nil {
 		logger.Error("store_initialization_failed", "error", err)
 		os.Exit(1)
@@ -46,11 +47,17 @@ func main() {
 	tracker := status.NewTracker()
 	service := aggregator.NewAggregator(poller, eventStore, publisher, cfg, logger, tracker)
 	apiHandler := handler.New(eventStore, tracker)
+	// p1
+	p1Handler := handler.NewP1(eventStore, cfg.AuditToken)
 	limiter := handler.NewLimiter(cfg.MaxInFlight)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go service.Run(ctx)
+	// p1: recovery continues even when live polling is disabled.
+	go eventStore.RunRecovery(ctx)
+	if !cfg.ImportOnly {
+		go service.Run(ctx)
+	}
 
 	// setup endpoints
 	mux := http.NewServeMux()
@@ -60,6 +67,13 @@ func main() {
 	mux.HandleFunc("GET /internal/events/{id}", handler.AggregatorAuth(limiter.Wrap(apiHandler.GetEventByID)))
 	mux.HandleFunc("GET /internal/source-status", handler.AggregatorAuth(limiter.Wrap(apiHandler.GetSourceStatus)))
 
+	// p1: audit has its own bearer credential and structured error contract.
+	mux.HandleFunc("GET /internal/audit/events", p1Handler.AuditAuth(p1Handler.GetAuditEvents))
+	mux.HandleFunc("GET /internal/audit/checksum", p1Handler.AuditAuth(p1Handler.GetAuditChecksum))
+	mux.HandleFunc("GET /internal/audit/location", p1Handler.AuditAuth(p1Handler.GetAuditLocation))
+	mux.HandleFunc("POST /internal/import/events", handler.AggregatorAuth(p1Handler.ImportEvents))
+	mux.HandleFunc("GET /internal/storage-stats", handler.AggregatorAuth(p1Handler.GetStorageStats))
+	mux.HandleFunc("GET /internal/analytics", handler.AggregatorAuth(p1Handler.GetAnalytics))
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
 		Handler:           handler.Logging(logger, mux),

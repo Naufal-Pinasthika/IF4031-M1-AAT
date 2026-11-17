@@ -36,14 +36,21 @@ type HazardEvent struct {
 	Attributes  map[string]any `json:"attributes"`
 }
 
+// p1
 type EventsEnvelope struct {
-	Events  []HazardEvent   `json:"events"`
-	Sources json.RawMessage `json:"sources"`
+	Partial          bool            `json:"partial"`
+	UnavailableUnits []string        `json:"unavailable_units"`
+	NextCursor       *string         `json:"next_cursor"`
+	Events           []HazardEvent   `json:"events"`
+	Sources          json.RawMessage `json:"sources"`
 }
 
+// p1
 type EventEnvelope struct {
-	Event        HazardEvent     `json:"event"`
-	SourceStatus json.RawMessage `json:"source_status"`
+	Partial          bool            `json:"partial"`
+	UnavailableUnits []string        `json:"unavailable_units"`
+	Event            *HazardEvent    `json:"event"`
+	SourceStatus     json.RawMessage `json:"source_status"`
 }
 
 func selectFields(raw, scopes string) ([]string, error) {
