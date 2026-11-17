@@ -7,6 +7,9 @@ type HazardSource string
 const (
 	SourceBMKG  HazardSource = "BMKG"
 	SourcePVMBG HazardSource = "PVMBG"
+	// p1: new canonical sources.
+	SourceSATELIT      HazardSource = "SATELIT"
+	SourceSENSORPANTAI HazardSource = "SENSOR_PANTAI"
 )
 
 type HazardType string
@@ -14,6 +17,10 @@ type HazardType string
 const (
 	HazardTypeSEISMIC  HazardType = "SEISMIC"
 	HazardTypeVOLCANIC HazardType = "VOLCANIC"
+	// p1: five dashboard categories.
+	HazardTypeTSUNAMI  HazardType = "TSUNAMI"
+	HazardTypeWILDFIRE HazardType = "WILDFIRE"
+	HazardTypeCOASTAL  HazardType = "COASTAL"
 )
 
 type SeverityLevel string
