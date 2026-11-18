@@ -36,7 +36,7 @@ spec:
       automountServiceAccountToken: false
       containers:
       - name: bmkg
-        image: bnpb/bmkg:m2-dev
+        image: aat/bmkg:m2-dev
         imagePullPolicy: IfNotPresent
         envFrom:
         - configMapRef:
@@ -113,7 +113,7 @@ spec:
       automountServiceAccountToken: false
       containers:
       - name: pvmbg
-        image: bnpb/pvmbg:m2-dev
+        image: aat/pvmbg:m2-dev
         imagePullPolicy: IfNotPresent
         envFrom:
         - configMapRef:
@@ -192,7 +192,7 @@ spec:
       automountServiceAccountToken: false
       containers:
       - name: aggregator
-        image: bnpb/aggregator:m2-dev
+        image: aat/aggregator:m2-dev
         imagePullPolicy: IfNotPresent
         envFrom:
         - configMapRef:
@@ -276,7 +276,7 @@ spec:
       automountServiceAccountToken: false
       containers:
       - name: auth
-        image: bnpb/auth:m2-dev
+        image: aat/auth:m2-dev
         imagePullPolicy: IfNotPresent
         envFrom:
         - configMapRef:
@@ -365,7 +365,7 @@ spec:
       automountServiceAccountToken: false
       containers:
       - name: client-api
-        image: bnpb/client-api:m2-dev
+        image: aat/client-api:m2-dev
         imagePullPolicy: IfNotPresent
         envFrom:
         - configMapRef:
@@ -444,7 +444,7 @@ spec:
       automountServiceAccountToken: false
       containers:
       - name: dashboard-consumer
-        image: bnpb/dashboard-consumer:m2-dev
+        image: aat/dashboard-consumer:m2-dev
         imagePullPolicy: IfNotPresent
         envFrom:
         - configMapRef:
@@ -534,7 +534,7 @@ spec:
       automountServiceAccountToken: false
       containers:
       - name: notifier-consumer
-        image: bnpb/notifier-consumer:m2-dev
+        image: aat/notifier-consumer:m2-dev
         imagePullPolicy: IfNotPresent
         envFrom:
         - configMapRef:

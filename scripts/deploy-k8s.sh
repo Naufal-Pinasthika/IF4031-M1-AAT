@@ -6,12 +6,13 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 NAMESPACE=sistem-informasi-kebencanaan-bnpb
 env_file="${REPO_ROOT}/.env"
-image_prefix=bnpb
+image_prefix=aat
 image_tag=m2-dev
 tag_supplied=false
 build=false
 push=false
 context=""
+target=""
 storage_class=""
 timeout=300s
 
@@ -22,10 +23,12 @@ Usage: bash scripts/deploy-k8s.sh [options]
 Deploy the P1 application to an already configured Kubernetes cluster.
 If .env does not exist, setup-env.sh creates it without replacing existing secrets.
 
+  --minikube                 Build and load local images, then deploy to Minikube
+  --k3s                      Deploy pre-imported images to the active k3s context
   --build                    Build all seven application images with Docker
   --push                     Push application images to --image-prefix
   --context CONTEXT          Use a specific kubeconfig context
-  --image-prefix PREFIX      Image prefix, e.g. docker.io/your-user (default: bnpb)
+  --image-prefix PREFIX      Image prefix, e.g. docker.io/your-user (default: aat)
   --image-tag TAG            Image tag (default: timestamp with --build, else m2-dev)
   --storage-class NAME       Node-local StorageClass (default: cluster default)
   --env-file PATH            Credentials/configuration file (default: .env)
@@ -33,12 +36,20 @@ If .env does not exist, setup-env.sh creates it without replacing existing secre
   -h, --help                 Show help
 
 Examples:
+  bash scripts/deploy-k8s.sh --minikube
+  bash scripts/deploy-k8s.sh --k3s
   bash scripts/deploy-k8s.sh --build --push --image-prefix docker.io/your-user
 EOF
 }
 
 while (( $# )); do
   case "$1" in
+    --minikube|--k3s)
+      selected_target="${1#--}"
+      if [[ -n "${target}" && "${target}" != "${selected_target}" ]]; then
+        echo 'error: choose either --minikube or --k3s' >&2; exit 2
+      fi
+      target="${selected_target}"; shift ;;
     --build) build=true; shift ;;
     --push) push=true; shift ;;
     --context|--image-prefix|--image-tag|--storage-class|--env-file|--timeout)
@@ -58,6 +69,17 @@ while (( $# )); do
     *) echo "error: unknown option $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ "${target}" == minikube ]]; then
+  if [[ "${push}" == true ]]; then
+    echo 'error: --minikube loads local images and cannot be combined with --push' >&2; exit 2
+  fi
+  context="${context:-minikube}"
+  build=true
+  for executable in minikube docker; do
+    command -v "${executable}" >/dev/null || { echo "error: ${executable} is required for --minikube" >&2; exit 1; }
+  done
+fi
 
 for executable in kubectl python3; do
   command -v "${executable}" >/dev/null || { echo "error: ${executable} is required" >&2; exit 1; }
@@ -125,6 +147,13 @@ fi
 if [[ "${push}" == true ]]; then
   for service in "${services[@]}"; do
     docker push "${image_prefix}/${service}:${image_tag}"
+  done
+fi
+
+if [[ "${target}" == minikube ]]; then
+  # Docker's image store is separate from the nodes' container runtimes.
+  for service in "${services[@]}"; do
+    minikube -p "${context}" image load --daemon "${image_prefix}/${service}:${image_tag}"
   done
 fi
 
