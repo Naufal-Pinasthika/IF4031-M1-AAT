@@ -144,7 +144,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--image-prefix", default="bnpb")
+    parser.add_argument("--image-prefix", default="aat")
     parser.add_argument("--image-tag", default="m2-dev")
     parser.add_argument("--storage-class")
     parser.add_argument("--existing-secrets", type=Path)
@@ -182,7 +182,7 @@ def main():
                 write_json(directory / "runtime.json", {"apiVersion": "v1", "kind": "List", "items": runtime})
                 overlay["resources"].append("runtime.json")
             if stage == "apps":
-                overlay["images"] = [{"name": f"bnpb/{name}", "newName": f"{args.image_prefix.rstrip('/')}/{name}",
+                overlay["images"] = [{"name": f"aat/{name}", "newName": f"{args.image_prefix.rstrip('/')}/{name}",
                                        "newTag": args.image_tag} for name in SERVICES]
                 overlay["patches"] = []
                 for name in SERVICES:
