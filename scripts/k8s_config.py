@@ -18,12 +18,16 @@ SECRET_KEYS = (
     "BMKG_API_KEY", "PVMBG_TOKEN", "AGGREGATOR_API_KEY", "POSTGRES_ADMIN_PASSWORD",
     "POSTGRES_APP_PASSWORD", "AUTH_POSTGRES_PASSWORD", "AUTH_JWT_PRIVATE_KEY_B64",
     "MEDIA_CLIENT_SECRET", "FIELD_CLIENT_SECRET", "OPS_CLIENT_SECRET",
+    # p1
+    "P1_AUDIT_TOKEN",
 )
 CONFIG_KEYS = {
     "bmkg": ("BMKG_EVENT_INTERVAL_MS",),
     "pvmbg": ("PVMBG_EVENT_INTERVAL_MS", "PVMBG_DELAY_MIN_MS", "PVMBG_DELAY_MAX_MS"),
     "aggregator": ("KAFKA_TOPIC", "AGGREGATOR_POLL_INTERVAL_MS", "AGGREGATOR_HTTP_TIMEOUT_MS",
-                   "AGGREGATOR_MAX_IN_FLIGHT", "AGGREGATOR_START_SINCE"),
+                   "AGGREGATOR_MAX_IN_FLIGHT", "AGGREGATOR_START_SINCE",
+                   # p1
+                   "P1_STORE_TIMEOUT_MS", "P1_IMPORT_ONLY"),
     "auth": ("AUTH_ACCESS_TOKEN_TTL_SECONDS", "AUTH_REFRESH_TOKEN_TTL_SECONDS", "AUTH_MAX_IN_FLIGHT",
              "AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "AUTH_JWT_KEY_ID", "MEDIA_CLIENT_ID",
              "FIELD_CLIENT_ID", "OPS_CLIENT_ID"),
@@ -99,15 +103,17 @@ def runtime_resources(values):
         "postgres": {"POSTGRES_PASSWORD": values["POSTGRES_ADMIN_PASSWORD"],
                      "POSTGRES_APP_PASSWORD": values["POSTGRES_APP_PASSWORD"]},
         "auth-postgres": {"POSTGRES_PASSWORD": values["AUTH_POSTGRES_PASSWORD"]},
-        "aggregator": {key: values[key] for key in ("BMKG_API_KEY", "PVMBG_TOKEN", "AGGREGATOR_API_KEY")},
+        "aggregator": {key: values[key] for key in ("BMKG_API_KEY", "PVMBG_TOKEN", "AGGREGATOR_API_KEY", "P1_AUDIT_TOKEN")},
         "auth": {key: values[key] for key in ("AUTH_JWT_PRIVATE_KEY_B64", "MEDIA_CLIENT_SECRET",
                                               "FIELD_CLIENT_SECRET", "OPS_CLIENT_SECRET")},
         "client-api": {"AGGREGATOR_API_KEY": values["AGGREGATOR_API_KEY"]},
     }
-    secrets["aggregator"]["DATABASE_URL"] = (
-        f"postgres://{quote(values['POSTGRES_APP_USER'], safe='')}:{quote(values['POSTGRES_APP_PASSWORD'], safe='')}"
-        "@postgres:5432/aggregator?sslmode=disable"
-    )
+    # p1: stable Services replace pod IPs and the legacy single database URL.
+    for letter in "ABC":
+        secrets["aggregator"][f"P1_STORAGE_{letter}_URL"] = (
+            f"postgres://{quote(values['POSTGRES_APP_USER'], safe='')}:{quote(values['POSTGRES_APP_PASSWORD'], safe='')}"
+            f"@postgres-{letter.lower()}:5432/aggregator?sslmode=disable"
+        )
     secrets["auth"]["AUTH_DATABASE_URL"] = (
         f"postgres://auth_app:{quote(values['AUTH_POSTGRES_PASSWORD'], safe='')}"
         "@auth-postgres:5432/auth?sslmode=disable"
@@ -116,6 +122,10 @@ def runtime_resources(values):
     result += [resource("Secret", f"{name}-credentials", data) for name, data in secrets.items()]
     result.append(resource("ConfigMap", "postgres-init", {
         "01-create-aggregator-user.sh": (ROOT / "services/database/init/01-create-aggregator-user.sh").read_text(),
+    }))
+    # p1: bootstrap is configuration, with node identity supplied at runtime.
+    result.append(resource("ConfigMap", "p1-storage-scripts", {
+        "p1-storage-start.sh": (ROOT / "services/database/p1-storage-start.sh").read_text(),
     }))
     return result
 
