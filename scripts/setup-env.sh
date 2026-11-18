@@ -64,10 +64,12 @@ replace_secret() {
   sed -i "s|${placeholder}|${value}|g" "${TEMP_ENV}"
 }
 
+# p1: include a separate audit credential without changing existing secrets.
 for placeholder in \
   replace-with-bmkg-api-key \
   replace-with-pvmbg-token \
   replace-with-aggregator-api-key \
+  replace-with-audit-token \
   replace-with-postgres-admin-password \
   replace-with-aggregator-app-password \
   replace-with-auth-postgres-password \

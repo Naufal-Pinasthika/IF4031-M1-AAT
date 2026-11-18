@@ -25,6 +25,14 @@ spec:
         app: bmkg
         role: mock
     spec:
+      # p1: keep services without HA available when a storage worker is lost.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
       automountServiceAccountToken: false
       containers:
       - name: bmkg
@@ -94,6 +102,14 @@ spec:
         app: pvmbg
         role: mock
     spec:
+      # p1: keep services without HA available when a storage worker is lost.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
       automountServiceAccountToken: false
       containers:
       - name: pvmbg
@@ -165,6 +181,14 @@ spec:
         app: aggregator
         role: aggregator
     spec:
+      # p1: keep services without HA available when a storage worker is lost.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
       automountServiceAccountToken: false
       containers:
       - name: aggregator
@@ -206,18 +230,6 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
-      initContainers:
-      - name: wait-for-database
-        image: postgres:16-alpine
-        command:
-        - sh
-        - -ec
-        - until pg_isready -h postgres -p 5432 -U postgres; do sleep 2; done
-        resources:
-          requests:
-            memory: 128Mi
-          limits:
-            memory: 256Mi
       topologySpreadConstraints:
       - maxSkew: 1
         topologyKey: kubernetes.io/hostname
@@ -253,6 +265,14 @@ spec:
         app: auth
         role: api
     spec:
+      # p1: keep services without HA available when a storage worker is lost.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
       automountServiceAccountToken: false
       containers:
       - name: auth
@@ -334,6 +354,14 @@ spec:
         app: client-api
         role: api
     spec:
+      # p1: keep services without HA available when a storage worker is lost.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
       automountServiceAccountToken: false
       containers:
       - name: client-api
@@ -405,6 +433,14 @@ spec:
         app: dashboard-consumer
         role: consumer
     spec:
+      # p1: keep services without HA available when a storage worker is lost.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
       automountServiceAccountToken: false
       containers:
       - name: dashboard-consumer
@@ -487,6 +523,14 @@ spec:
         app: notifier-consumer
         role: consumer
     spec:
+      # p1: keep services without HA available when a storage worker is lost.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
       automountServiceAccountToken: false
       containers:
       - name: notifier-consumer

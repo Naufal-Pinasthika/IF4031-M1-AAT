@@ -11,9 +11,7 @@ image_tag=m2-dev
 tag_supplied=false
 build=false
 push=false
-check=false
 context=""
-minikube_profile=""
 storage_class=""
 timeout=300s
 
@@ -21,26 +19,21 @@ usage() {
   cat <<'EOF'
 Usage: bash scripts/deploy-k8s.sh [options]
 
-Deploy the existing M1 services to an already configured Kubernetes cluster.
+Deploy the P1 application to an already configured Kubernetes cluster.
 If .env does not exist, setup-env.sh creates it without replacing existing secrets.
 
   --build                    Build all seven application images with Docker
   --push                     Push application images to --image-prefix
-  --load-minikube PROFILE     Load application images into this minikube profile
-                             and use its kubectl context (development only)
   --context CONTEXT          Use a specific kubeconfig context
   --image-prefix PREFIX      Image prefix, e.g. docker.io/your-user (default: bnpb)
   --image-tag TAG            Image tag (default: timestamp with --build, else m2-dev)
   --storage-class NAME       Node-local StorageClass (default: cluster default)
   --env-file PATH            Credentials/configuration file (default: .env)
   --timeout DURATION         Wait timeout per workload (default: 300s)
-  --check                    Render all stages offline without applying or building
   -h, --help                 Show help
 
 Examples:
-  bash scripts/deploy-k8s.sh --build --load-minikube bnpb-dev
   bash scripts/deploy-k8s.sh --build --push --image-prefix docker.io/your-user
-  bash scripts/deploy-k8s.sh --check
 EOF
 }
 
@@ -48,14 +41,12 @@ while (( $# )); do
   case "$1" in
     --build) build=true; shift ;;
     --push) push=true; shift ;;
-    --check) check=true; shift ;;
-    --context|--load-minikube|--image-prefix|--image-tag|--storage-class|--env-file|--timeout)
+    --context|--image-prefix|--image-tag|--storage-class|--env-file|--timeout)
       if (( $# < 2 )) || [[ -z "$2" || "$2" == --* ]]; then
         echo "error: $1 requires a value" >&2; exit 2
       fi
       case "$1" in
         --context) context="$2" ;;
-        --load-minikube) minikube_profile="$2" ;;
         --image-prefix) image_prefix="${2%/}" ;;
         --image-tag) image_tag="$2"; tag_supplied=true ;;
         --storage-class) storage_class="$2" ;;
@@ -71,15 +62,6 @@ done
 for executable in kubectl python3; do
   command -v "${executable}" >/dev/null || { echo "error: ${executable} is required" >&2; exit 1; }
 done
-if [[ -n "${minikube_profile}" ]]; then
-  if [[ -n "${context}" && "${context}" != "${minikube_profile}" ]]; then
-    echo "error: --context must match --load-minikube" >&2; exit 2
-  fi
-  context="${minikube_profile}"
-fi
-if [[ "${push}" == true && -n "${minikube_profile}" ]]; then
-  echo "error: choose registry push or minikube image loading" >&2; exit 2
-fi
 if [[ ! -f "${env_file}" ]]; then
   if [[ "${env_file}" == "${REPO_ROOT}/.env" ]]; then
     bash "${SCRIPT_DIR}/setup-env.sh"
@@ -96,10 +78,10 @@ kube=(kubectl)
 render_dir="$(mktemp -d "${REPO_ROOT}/k8s/.render.XXXXXX")"
 trap 'rm -rf -- "${render_dir}"' EXIT
 
-if [[ "${check}" != true ]]; then
-  "${kube[@]}" get nodes --request-timeout=10s
-  "${kube[@]}" get storageclasses -o json > "${render_dir}/storageclasses.json"
-  storage_class="$(python3 - "${render_dir}/storageclasses.json" "${storage_class}" <<'PY'
+# p1: validate cluster storage before applying resources.
+"${kube[@]}" get nodes --request-timeout=10s
+"${kube[@]}" get storageclasses -o json > "${render_dir}/storageclasses.json"
+storage_class="$(python3 - "${render_dir}/storageclasses.json" "${storage_class}" <<'PY'
 import json
 import sys
 classes = json.load(open(sys.argv[1]))['items']
@@ -119,27 +101,19 @@ if item['provisioner'] not in ('rancher.io/local-path', 'k8s.io/minikube-hostpat
 print(item['metadata']['name'])
 PY
 )"
-  "${kube[@]}" -n "${NAMESPACE}" get secrets postgres-credentials auth-postgres-credentials \
-    --ignore-not-found -o json > "${render_dir}/existing-secrets.json"
-  "${kube[@]}" -n "${NAMESPACE}" get configmap postgres-config \
-    --ignore-not-found -o json > "${render_dir}/existing-postgres-config.json"
-fi
-
+"${kube[@]}" -n "${NAMESPACE}" get secrets postgres-credentials auth-postgres-credentials \
+  --ignore-not-found -o json > "${render_dir}/existing-secrets.json"
+"${kube[@]}" -n "${NAMESPACE}" get configmap postgres-config \
+  --ignore-not-found -o json > "${render_dir}/existing-postgres-config.json"
 render_args=(--env-file "${env_file}" --output-dir "${render_dir}"
              --image-prefix "${image_prefix}" --image-tag "${image_tag}")
 [[ -z "${storage_class}" ]] || render_args+=(--storage-class "${storage_class}")
-if [[ "${check}" != true ]]; then
-  render_args+=(--existing-secrets "${render_dir}/existing-secrets.json"
-                --existing-postgres-config "${render_dir}/existing-postgres-config.json")
-fi
+render_args+=(--existing-secrets "${render_dir}/existing-secrets.json"
+              --existing-postgres-config "${render_dir}/existing-postgres-config.json")
 python3 "${SCRIPT_DIR}/k8s_config.py" "${render_args[@]}"
 for stage in platform jobs apps; do
   "${kube[@]}" kustomize "${render_dir}/${stage}" > "${render_dir}/${stage}.yaml"
 done
-if [[ "${check}" == true ]]; then
-  echo "Rendered platform, jobs, and apps successfully; no cluster changes."
-  exit 0
-fi
 
 services=(aggregator auth bmkg client-api dashboard-consumer notifier-consumer pvmbg)
 if [[ "${build}" == true ]]; then
@@ -153,16 +127,11 @@ if [[ "${push}" == true ]]; then
     docker push "${image_prefix}/${service}:${image_tag}"
   done
 fi
-if [[ -n "${minikube_profile}" ]]; then
-  command -v minikube >/dev/null || { echo 'error: minikube is required' >&2; exit 1; }
-  for service in "${services[@]}"; do
-    minikube -p "${minikube_profile}" image load --daemon "${image_prefix}/${service}:${image_tag}"
-  done
-fi
 
 # Dependencies start first, so application startup cannot race topic creation.
 "${kube[@]}" apply -f "${render_dir}/platform.yaml"
-for workload in postgres auth-postgres kafka; do
+# p1: initialize all three storage units before starting applications.
+for workload in postgres-a postgres-b postgres-c auth-postgres kafka; do
   "${kube[@]}" -n "${NAMESPACE}" rollout status "statefulset/${workload}" --timeout="${timeout}"
 done
 # Only the idempotent topic-provisioning Job is replaced, never PVCs or data.
@@ -177,5 +146,5 @@ for service in dashboard-consumer notifier-consumer; do
   "${kube[@]}" -n "${NAMESPACE}" rollout status "statefulset/${service}" --timeout="${timeout}"
 done
 "${kube[@]}" -n "${NAMESPACE}" get pods -o wide
-echo "Deployed M1 Kubernetes baseline with image tag ${image_tag}."
-echo "Run smoke checks: bash scripts/check-k8s.sh${context:+ --context ${context}}"
+# p1
+echo "Deployed P1 Kubernetes stack with image tag ${image_tag}."

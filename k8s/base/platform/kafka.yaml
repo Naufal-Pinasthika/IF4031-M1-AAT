@@ -50,6 +50,14 @@ spec:
         app: kafka
         role: broker
     spec:
+      # p1: keep services without HA available when a storage worker is lost.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
       automountServiceAccountToken: false
       containers:
       - name: kafka

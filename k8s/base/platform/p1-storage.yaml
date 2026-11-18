@@ -1,0 +1,342 @@
+# p1: two copies per event, three node-local units with mandatory node separation.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-a
+spec:
+  selector:
+    app: postgres-a
+  ports:
+  - name: tcp
+    port: 5432
+    targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-a
+spec:
+  serviceName: postgres-a
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-a
+  template:
+    metadata:
+      labels:
+        app: postgres-a
+        role: store
+        bnpb.io/p1-storage: 'true'
+    spec:
+      automountServiceAccountToken: false
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                bnpb.io/p1-storage: 'true'
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        command:
+        - sh
+        - /opt/p1/p1-storage-start.sh
+        envFrom:
+        - configMapRef:
+            name: postgres-config
+        - secretRef:
+            name: postgres-credentials
+        env:
+        - name: P1_UNIT_NAME
+          value: store-a
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        ports:
+        - containerPort: 5432
+        resources:
+          requests:
+            memory: 512Mi
+          limits:
+            memory: 1Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        - name: postgres-init
+          mountPath: /docker-entrypoint-initdb.d
+          readOnly: true
+        - name: p1-scripts
+          mountPath: /opt/p1
+          readOnly: true
+        startupProbe:
+          exec: &id001
+            command:
+            - sh
+            - -ec
+            - test -f /tmp/p1-storage-ready && pg_isready -U postgres -d aggregator
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 60
+        readinessProbe:
+          exec: *id001
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - postgres
+            - -d
+            - aggregator
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+      volumes:
+      - name: postgres-init
+        configMap:
+          name: postgres-init
+          defaultMode: 365
+      - name: p1-scripts
+        configMap:
+          name: p1-storage-scripts
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-b
+spec:
+  selector:
+    app: postgres-b
+  ports:
+  - name: tcp
+    port: 5432
+    targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-b
+spec:
+  serviceName: postgres-b
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-b
+  template:
+    metadata:
+      labels:
+        app: postgres-b
+        role: store
+        bnpb.io/p1-storage: 'true'
+    spec:
+      automountServiceAccountToken: false
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                bnpb.io/p1-storage: 'true'
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        command:
+        - sh
+        - /opt/p1/p1-storage-start.sh
+        envFrom:
+        - configMapRef:
+            name: postgres-config
+        - secretRef:
+            name: postgres-credentials
+        env:
+        - name: P1_UNIT_NAME
+          value: store-b
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        ports:
+        - containerPort: 5432
+        resources:
+          requests:
+            memory: 512Mi
+          limits:
+            memory: 1Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        - name: postgres-init
+          mountPath: /docker-entrypoint-initdb.d
+          readOnly: true
+        - name: p1-scripts
+          mountPath: /opt/p1
+          readOnly: true
+        startupProbe:
+          exec: &id001
+            command:
+            - sh
+            - -ec
+            - test -f /tmp/p1-storage-ready && pg_isready -U postgres -d aggregator
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 60
+        readinessProbe:
+          exec: *id001
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - postgres
+            - -d
+            - aggregator
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+      volumes:
+      - name: postgres-init
+        configMap:
+          name: postgres-init
+          defaultMode: 365
+      - name: p1-scripts
+        configMap:
+          name: p1-storage-scripts
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-c
+spec:
+  selector:
+    app: postgres-c
+  ports:
+  - name: tcp
+    port: 5432
+    targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-c
+spec:
+  serviceName: postgres-c
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-c
+  template:
+    metadata:
+      labels:
+        app: postgres-c
+        role: store
+        bnpb.io/p1-storage: 'true'
+    spec:
+      automountServiceAccountToken: false
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                bnpb.io/p1-storage: 'true'
+            topologyKey: kubernetes.io/hostname
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        command:
+        - sh
+        - /opt/p1/p1-storage-start.sh
+        envFrom:
+        - configMapRef:
+            name: postgres-config
+        - secretRef:
+            name: postgres-credentials
+        env:
+        - name: P1_UNIT_NAME
+          value: store-c
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        ports:
+        - containerPort: 5432
+        resources:
+          requests:
+            memory: 512Mi
+          limits:
+            memory: 1Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        - name: postgres-init
+          mountPath: /docker-entrypoint-initdb.d
+          readOnly: true
+        - name: p1-scripts
+          mountPath: /opt/p1
+          readOnly: true
+        startupProbe:
+          exec: &id001
+            command:
+            - sh
+            - -ec
+            - test -f /tmp/p1-storage-ready && pg_isready -U postgres -d aggregator
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 60
+        readinessProbe:
+          exec: *id001
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - postgres
+            - -d
+            - aggregator
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+      volumes:
+      - name: postgres-init
+        configMap:
+          name: postgres-init
+          defaultMode: 365
+      - name: p1-scripts
+        configMap:
+          name: p1-storage-scripts
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      resources:
+        requests:
+          storage: 5Gi
