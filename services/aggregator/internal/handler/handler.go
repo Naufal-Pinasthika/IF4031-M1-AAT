@@ -72,7 +72,15 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	page, err := h.reader.ListEvents(r.Context(), filter)
+	var page store.EventPage
+	var encoded []byte
+	if reader, ok := h.reader.(interface {
+		listEventsEncoded(context.Context, store.EventFilter) (store.EventPage, []byte, error)
+	}); ok {
+		page, encoded, err = reader.listEventsEncoded(r.Context(), filter)
+	} else {
+		page, err = h.reader.ListEvents(r.Context(), filter)
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrStorageBusy) {
 			w.Header().Set("Retry-After", "1")
@@ -86,12 +94,7 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load hazard events")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"events":  page.Events,
-		"partial": page.Partial, "unavailable_units": page.UnavailableUnits, "next_cursor": page.NextCursor,
-		"replication_degraded": page.ReplicationDegraded, "lagging_units": page.LaggingUnits,
-		"sources": h.sourceStatuses(filter.Source),
-	})
+	writeEventPage(w, page, encoded, h.sourceStatuses(filter.Source), r)
 }
 
 // p1
