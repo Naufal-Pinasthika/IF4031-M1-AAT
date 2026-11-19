@@ -1,6 +1,6 @@
 # M2 whole-system review and P2/P5 improvements
 
-For the current build and acceptance results, see the [verification status](README.md).
+For the current build and acceptance results, see the [verification status](../status/README.md).
 This review retains historical design context; dated run journals remain local.
 
 Review date: 19 November 2026. The entire M2 specification was reread, including
@@ -12,13 +12,13 @@ This document separates **implementation**, **regression evidence**, and
 **unproven acceptance criteria**. Update: these changes were deployed as
 `m2-vps-20261119-03`, followed by the source-clock/valid-critical correction in
 `m2-vps-20261119-04`, then fleet-wide cached source health in build `05`.
-See [repeated P5 testing status](README.md).
+See [repeated P5 testing status](../status/README.md).
 Follow-up: [durable measurement and operations dashboard](P5-observability.md).
 The operator deferred HA and requested restoration of the original singleton
 coordinator/Kafka/notifier topology. Experimental replication is not active.
 The earlier 10k result used image `m2-vps-20261119-02`, not these changes.
 
-Follow-up: [canonical replica consistency correction status](README.md).
+Follow-up: [canonical replica consistency correction status](../status/README.md).
 Build `10-replication` uses coordinator schema v3 and durable per-target
 acknowledgements. Earlier build-09 load results do not validate this change.
 
@@ -184,7 +184,7 @@ uncertain and breaker unhealthy rather than falsely reporting freshness.
 Quarantine/admission failures still prevent checkpoint advancement. Removed an
 invented five-minute observed_at/generated_at skew bound that was not present
 in the base contract. Detailed component and E2E evidence/limits are in the
-[P5 verification status](README.md).
+[P5 verification status](../status/README.md).
 
 ### M1/P5: consistent source freshness on read-only replicas
 
@@ -201,7 +201,7 @@ race tests cover outage/recovery, expired owners and coordinator-refresh failure
 ## 4. Acceptance criteria: remaining evidence and risks
 
 The following matrix is a design-review snapshot. Latest deployed-build P5
-evidence is summarized in the [verification status](README.md): nine load
+evidence is summarized in the [verification status](../status/README.md): nine load
 rounds and three identity catch-up rounds passed; seven-service metrics and one
 asynchronous trace were checked. Fresh critical latency and broad node-loss /
 game-day acceptance remain open. Do not read older dashboard/testing gaps below
@@ -293,11 +293,9 @@ No completed game-day budget consumption is claimed in this review.
   regression PostgreSQL was removed; no application pod, PVC, Tester Agent,
   source profile, application resource limit or load script was modified by tests.
 
-Repeat the isolated checks from Ubuntu WSL:
-
-```bash
-python3 infra/vps/test-design.py
-```
+The infrastructure regression runner used for those checks was removed during
+cleanup. The results above are historical; future standalone runners belong in
+[`test/`](../../test/README.md). No replacement suite or new acceptance result is supplied.
 
 Build 05 is deployed, with repeated scoped P5 E2E documented separately; it is
 not a full acceptance pass. Preserve PVCs/credentials and collect evidence for

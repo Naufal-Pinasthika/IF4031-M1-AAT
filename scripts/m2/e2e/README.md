@@ -1,7 +1,7 @@
 # Pengujian E2E P2/P5
 
 Current design and verification results are summarized in
-[the published status](../../../docs/README.md). The dated local retest journal
+[the published status](../../../docs/status/README.md). The dated local retest journal
 is ignored by Git. The table below retains historical, not current, results.
 
 Lab ini khusus pengujian lokal, bukan pengganti seluruh bukti demo. Status

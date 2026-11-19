@@ -23,7 +23,8 @@ coverage.out
 !/infra/vps/inventory.example.json
 
 # Keep reusable design/operations guides in Git, not dated operator journals.
-# These files remain on disk; docs/README.md carries the published status.
-/docs/*-20??-??-??.md
+# These files remain local; docs/README.md links the published status.
+/docs/changelog/*-20??-??-??.md
+!/docs/changelog/verification-2026-11-19.md
 /infra/vps/*-20??-??-??.md
 /scripts/m2/e2e/retest-20??-??-??.md

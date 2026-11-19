@@ -155,46 +155,22 @@ exec and remove the opt-in after the explicitly instrumented experiment.
 
 ## Deployment and verification
 
-The normal one-command Kubernetes deployment includes the gateway. For a scoped
-existing-VPS upgrade, preserving all PVCs and official sensor/tester images:
+The normal Kubernetes deployment includes the gateway. The retained scoped
+entry point is `python3 infra/vps/deploy-p2-capacity.py`; review live schema
+compatibility and obtain fresh regression evidence before executing it.
 
-```bash
-python3 infra/vps/test-design.py --focused-repeat 3
-python3 infra/vps/deploy-p2-capacity.py
-python3 infra/vps/check-p2-capacity.py
-sudo python3 infra/vps/test-p2-clock.py --benchmark
-```
+An interrupted scoped deployment can use `--resume p2-capacity-deploy-<UTC stamp>`.
+The deployment validates retained state and the current image before reusing
+that image and original rollback target. It refuses completed records and
+unrelated live image changes. It retains previous image/selectors/config values,
+waits for readiness, and preserves PVCs and official sensor/tester images.
 
-For an interrupted deployment with a completed image build, the scoped deploy
-also accepts `--resume p2-capacity-deploy-<UTC stamp>`. It validates the retained
-record and current image before reusing that exact image, preserving the original
-rollback target. It refuses completed records and unrelated live image changes.
-Do not run builds, regression fixtures or another fault/load campaign alongside
-the capacity comparison; all mutating VPS test/deploy tools share a local lock.
-
-The scoped deploy builds only Aggregator/gateway, imports the image to A/B/C,
-waits for readiness before switching the common-entry selectors and retains
-previous image/selectors/config values for rollback. The last command temporarily
-pauses guest NTP only and restores it afterward, using the unchanged four-case
-1,000-VU/60s workload. It is not the sustained 10k test. After throughput,
-rerun sustained scaling, strict rolling, owner/clock/source audits and actual
-VM suspend/resume; historical passes are not new-build evidence.
-
-`test-p2-load.py rolling --rolling-target aggregator-gateway --previous-image
-<compatible-image>` uses the same strict 50-VU/120s complete-response workload
-while updating gateway images instead of Aggregator images. It requires both
-gateway binaries to become fully Ready, distinct observed image IDs, zero HTTP
-failures and complete response checks, then restores the starting image. An
-Aggregator-only rolling pass is not gateway replacement evidence. The C-host
-generator remains colocated and is reported as such.
-
-The stock k6 v2.4.0 binary was also probed with exactly one loopback request:
-it did not send Accept-Encoding. Thus the unchanged standard test does not
-exercise negotiated compression. `--workload gzip` on the clock/laptop runner
-selects a separately labelled script with the same VUs, duration, request data,
-validation, timeout and thresholds, adding only Accept-Encoding: gzip and a
-compressed-response counter. Retain/report both workloads separately; never
-replace or relabel a failed standard run as a gzip pass.
+Former infrastructure test, clock-experiment, negotiation, and diagnosis runners
+were removed. Their earlier workload descriptions and results are historical,
+not runnable commands or a new-build pass. New standalone runners belong under
+[`test/`](../../test/README.md). Re-establish throughput, scaling, rolling,
+ownership/source audits, and stale-process-resume evidence before acceptance.
+Do not run builds or fault/regression campaigns alongside clean capacity tests.
 
 ## CQRS decision
 

@@ -1,6 +1,6 @@
 # P5 measurement and observability (singleton infrastructure)
 
-Latest [singleton retest summary](README.md) additionally observed
+Latest [singleton retest summary](../status/README.md) additionally observed
 and strictly checked an asynchronous Aggregator → both-consumers trace, including
 publish/fetch/delivery/commit durations. This is sampled bounded-log evidence,
 not guaranteed coverage of every event. Fresh critical SLO samples remain absent.
@@ -51,13 +51,15 @@ public HTTP entry point. Prometheus monitoring data is disposable, retained for
 # From the repository root in WSL; keep this terminal open.
 python3 infra/vps/access.py observe
 # Open http://localhost:8090 in your browser.
-python3 infra/vps/test-observability.py
 python3 scripts/m2/p5/test_reliability.py
 ```
+
+The old infrastructure observability test runner was deleted. Future standalone
+verification tooling belongs in [`test/`](../../test/README.md).
 
 Functional evidence before rollback: `.e2e/p5-observability-20261119T071030Z.json`
 scraped all seven service types and reconstructed 11 log records from a real
 Auth → Client API → Aggregator workflow. It did not prove the asynchronous
 event trace complete. Automated browser access was unavailable, so visual QA
-is not claimed. See the [singleton verification summary](README.md)
+is not claimed. See the [singleton verification summary](../status/README.md)
 for verification of the restored build, including post-rebuild dashboard checks.

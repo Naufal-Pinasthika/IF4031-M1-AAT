@@ -312,5 +312,5 @@ Before implementation, resolve these gates explicitly:
    do not redefine the source-to-recipient SLO around convenient timestamps.
 
 This proposal is ready for discussion and targeted design validation, **not a
-statement that P2/P5 now pass**. See [current implementation/results](README.md)
+statement that P2/P5 now pass**. See [current implementation/results](../status/README.md)
 for what has actually been deployed and measured.
