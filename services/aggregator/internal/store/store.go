@@ -35,6 +35,9 @@ type unit struct {
 	pool                        *pgxpool.Pool
 	probe                       *pgxpool.Pool
 	priority                    *pgxpool.Pool
+	maintenance                 *pgxpool.Pool
+	readSlots                   chan struct{}
+	repairing                   bool
 	online, ready               bool
 	generation                  uint64
 	writes, writeErrors, copied int64
@@ -70,6 +73,16 @@ func New(ctx context.Context, configs []config.StorageUnit, timeout time.Duratio
 		}
 		pc.ConnConfig.Tracer = &postgresTracer{logger: logger.With("storage_unit", cfg.Name)}
 		pc.ConnConfig.ConnectTimeout = timeout
+		// Reserve one EXISTING regular connection for maintenance. Do not grow
+		// the per-unit connection ceiling when adding the recovery bulkhead.
+		maintenanceConfig := pc.Copy()
+		dedicatedMaintenance := pc.MaxConns > 1
+		if dedicatedMaintenance {
+			pc.MaxConns--
+			maintenanceConfig.MaxConns = 1
+			maintenanceConfig.MinConns = 0
+			pc.MinConns = min(pc.MinConns, pc.MaxConns)
+		}
 		p, err := pgxpool.NewWithConfig(ctx, pc)
 		if err != nil {
 			s.Close()
@@ -96,8 +109,17 @@ func New(ctx context.Context, configs []config.StorageUnit, timeout time.Duratio
 			s.Close()
 			return nil, fmt.Errorf("create health pool for %s", cfg.Name)
 		}
-		u := &unit{name: cfg.Name, pool: p, probe: probe, priority: priority}
+		u := &unit{name: cfg.Name, pool: p, probe: probe, priority: priority,
+			readSlots: make(chan struct{}, max(1, pc.MaxConns-1))}
 		s.units = append(s.units, u)
+		if dedicatedMaintenance {
+			maintenance, err := pgxpool.NewWithConfig(ctx, maintenanceConfig)
+			if err != nil {
+				s.Close()
+				return nil, fmt.Errorf("create maintenance pool for %s", cfg.Name)
+			}
+			u.maintenance = maintenance
+		}
 		op, cancel := context.WithTimeout(ctx, timeout)
 		err = s.ensureSchema(op, u)
 		if err == nil {
@@ -155,6 +177,9 @@ func (s *Store) Close() {
 		if u.priority != nil {
 			u.priority.Close()
 		}
+		if u.maintenance != nil {
+			u.maintenance.Close()
+		}
 	}
 }
 
@@ -201,15 +226,22 @@ func availabilityError(err error) bool {
 // p1
 func (s *Store) markDown(u *unit) {
 	s.state.Lock()
+	wasOnline := withdrawUnit(u)
+	s.state.Unlock()
+	if wasOnline {
+		s.logger.Warn("storage_unit_unreachable", "storage_unit", u.name)
+	}
+}
+
+// Caller holds Store.state. Keep health transitions atomic with generation
+// checks so a stale probe cannot withdraw a newer successful repair epoch.
+func withdrawUnit(u *unit) bool {
 	wasOnline := u.online
 	u.online = false
 	u.ready = false
 	u.generation++
 	u.checkpoint = ""
-	s.state.Unlock()
-	if wasOnline {
-		s.logger.Warn("storage_unit_unreachable", "storage_unit", u.name)
-	}
+	return wasOnline
 }
 
 // A single probe deadline can mean scheduler/pool pressure, not a failed disk.
@@ -217,21 +249,30 @@ func (s *Store) markDown(u *unit) {
 // Definitive connection/schema failures and application I/O failures retain the
 // immediate down transition. Reads still attempt bounded live I/O in this window;
 // this does not manufacture a successful response from an unavailable database.
-func (s *Store) noteProbeFailure(ctx context.Context, u *unit, err error) {
+func (s *Store) noteProbeFailure(ctx context.Context, u *unit, err error, observedGeneration ...uint64) {
 	if ctx.Err() != nil {
 		return
 	}
-	if !budgetError(err) {
-		s.markDown(u)
+	s.state.Lock()
+	if len(observedGeneration) > 0 && u.generation != observedGeneration[0] {
+		s.state.Unlock()
 		return
 	}
-	s.state.Lock()
-	u.probeTimeouts++
+	ambiguous := budgetError(err)
+	if ambiguous {
+		u.probeTimeouts++
+	}
 	count := u.probeTimeouts
+	wasOnline := false
+	if !ambiguous || count >= 3 {
+		wasOnline = withdrawUnit(u)
+	}
 	s.state.Unlock()
-	s.logger.Warn("storage_probe_timeout", "storage_unit", u.name, "consecutive", count)
-	if count >= 3 {
-		s.markDown(u)
+	if ambiguous {
+		s.logger.Warn("storage_probe_timeout", "storage_unit", u.name, "consecutive", count)
+	}
+	if wasOnline {
+		s.logger.Warn("storage_unit_unreachable", "storage_unit", u.name)
 	}
 }
 
@@ -239,7 +280,10 @@ func (s *Store) noteProbeFailure(ctx context.Context, u *unit, err error) {
 // health. Only the independent probe (which cannot queue behind application
 // traffic) may turn a probe timeout into an availability-state transition.
 func budgetError(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err)
+	var networkError net.Error
+	return errors.Is(err, ErrStorageBusy) || errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) ||
+		errors.As(err, &networkError) && networkError.Timeout()
 }
 
 func (s *Store) noteIOFailure(u *unit, err error) {
@@ -411,7 +455,7 @@ func (s *Store) writeRecords(ctx context.Context, u *unit, records []record) err
 	}
 	op, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	tx, err := u.pool.Begin(op)
+	tx, err := u.operationPool(ctx).Begin(op)
 	if err != nil {
 		return err
 	}
@@ -441,11 +485,12 @@ func (s *Store) ensureSchema(ctx context.Context, u *unit) error {
 	// EXISTS is a no-op. A new read replica must not queue DDL ahead of live
 	// requests on an already current schema. Keep this probe in sync with
 	// future schema versions; missing tables/columns still take the migration.
-	rows, probeErr := u.pool.Query(ctx, `SELECT partition_id,revision,fencing_token,ingestion_version FROM hazard_events LIMIT 0`)
+	pool := u.operationPool(ctx)
+	rows, probeErr := pool.Query(ctx, `SELECT partition_id,revision,fencing_token,ingestion_version FROM hazard_events LIMIT 0`)
 	if probeErr == nil {
 		rows.Close()
 		var name string
-		probeErr = u.pool.QueryRow(ctx, `SELECT unit_name FROM p1_metadata WHERE singleton=true`).Scan(&name)
+		probeErr = pool.QueryRow(ctx, `SELECT unit_name FROM p1_metadata WHERE singleton=true`).Scan(&name)
 		if probeErr == nil && name == u.name {
 			return nil
 		}
@@ -456,7 +501,7 @@ func (s *Store) ensureSchema(ctx context.Context, u *unit) error {
 			return probeErr
 		}
 	}
-	tx, err := u.pool.Begin(ctx)
+	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
