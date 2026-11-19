@@ -13,8 +13,8 @@ import re
 import shlex
 import subprocess
 from provision import Hosts, ROOT, inventory
+from vps_config import NAMESPACE as NS, SERVICE_ENDPOINTS
 
-NS = 'sistem-informasi-kebencanaan-bnpb'
 TESTER = 'https://raw.githubusercontent.com/susTuna/if4031-tester-agent/ebb55261711123a9a211739ffbf140a275caa6da/manifest.yaml'
 
 
@@ -33,12 +33,10 @@ def import_worker(hosts, node, tag):
 
 def services():
     result = []
-    for name, port, nodeport in [('aggregator', 8083, 30083), ('client-api', 8080, 30080),
-                                  ('auth', 8084, 30084), ('sensor-pantai', 8080, 30090),
-                                  ('notifier-consumer', 8086, 30086)]:
+    for name, port, nodeport, backend in SERVICE_ENDPOINTS:
         result.append({'apiVersion': 'v1', 'kind': 'Service',
                        'metadata': {'name': name + '-vps', 'namespace': NS},
-                       'spec': {'type': 'NodePort', 'selector': {'app': 'aggregator-gateway' if name=='aggregator' else name},
+                       'spec': {'type': 'NodePort', 'selector': {'app': backend},
                                 'ports': [{'port': port, 'targetPort': port, 'nodePort': nodeport}]}})
     return {'apiVersion': 'v1', 'kind': 'List', 'items': result}
 

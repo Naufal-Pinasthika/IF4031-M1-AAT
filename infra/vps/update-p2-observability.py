@@ -7,7 +7,8 @@ import shlex
 import subprocess
 import time
 from provision import Hosts,ROOT,inventory
-from deploy import NS,import_worker
+from deploy import import_worker
+from vps_config import NAMESPACE as NS
 
 
 def main():
