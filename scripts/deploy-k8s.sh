@@ -184,7 +184,7 @@ for name, group in [('core-apps', others), ('sensor-app', sensor)]:
     (directory / (name + '.json')).write_text(json.dumps({'apiVersion':'v1', 'kind':'List', 'items':group}))
 PY
 "${kube[@]}" apply -f "${render_dir}/core-apps.json"
-for service in aggregator auth bmkg client-api pvmbg; do
+for service in aggregator aggregator-gateway auth bmkg client-api pvmbg; do
   "${kube[@]}" -n "${NAMESPACE}" rollout status "deployment/${service}" --timeout="${timeout}"
 done
 for service in dashboard-consumer notifier-consumer; do
