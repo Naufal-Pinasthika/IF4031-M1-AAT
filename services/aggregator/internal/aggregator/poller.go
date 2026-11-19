@@ -2,6 +2,9 @@ package aggregator
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/correlation"
 	"log/slog"
 	"time"
 
@@ -31,7 +34,10 @@ func New(client *Client, cfg config.Config, logger *slog.Logger) *Poller {
 
 func (p *Poller) PollBMKG(ctx context.Context, since time.Time) (BMKGBatch, error) {
 	startedAt := time.Now()
-	correlationID := newCorrelationID()
+	correlationID := correlation.ID(ctx)
+	if correlationID == "" {
+		correlationID = newCorrelationID()
+	}
 	events, warnings, err := p.client.FetchBMKG(ctx, p.config.BMKGURL, p.config.BMKGAPIKey, correlationID, since)
 	if err != nil {
 		p.logger.Error("bmkg_poll_failed", "error", err, "correlation_id", correlationID, "latency_ms", time.Since(startedAt).Milliseconds())
@@ -44,7 +50,10 @@ func (p *Poller) PollBMKG(ctx context.Context, since time.Time) (BMKGBatch, erro
 
 func (p *Poller) PollPVMBG(ctx context.Context, since time.Time) (PVMBGBatch, error) {
 	startedAt := time.Now()
-	correlationID := newCorrelationID()
+	correlationID := correlation.ID(ctx)
+	if correlationID == "" {
+		correlationID = newCorrelationID()
+	}
 	reports, err := p.client.FetchPVMBG(ctx, p.config.PVMBGURL, p.config.PVMBGToken, correlationID, since)
 	if err != nil {
 		p.logger.Error("pvmbg_poll_failed", "error", err, "correlation_id", correlationID, "latency_ms", time.Since(startedAt).Milliseconds())
@@ -56,5 +65,9 @@ func (p *Poller) PollPVMBG(ctx context.Context, since time.Time) (PVMBGBatch, er
 }
 
 func newCorrelationID() string {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err == nil {
+		return hex.EncodeToString(value[:])
+	}
 	return time.Now().UTC().Format("20060102T150405.000000000Z07:00")
 }

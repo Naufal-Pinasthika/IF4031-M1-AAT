@@ -8,7 +8,7 @@ spec:
     matchExpressions:
     - key: app
       operator: In
-      values: [postgres, postgres-a, postgres-b, postgres-c]
+      values: [postgres, postgres-a, postgres-b, postgres-c, aggregator-coordinator]
   policyTypes:
   - Ingress
   ingress:

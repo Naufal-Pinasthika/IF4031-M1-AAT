@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/client-api/internal/telemetry"
 	"io"
 	"log/slog"
 	"net/http"
@@ -31,7 +32,8 @@ type Server struct {
 	aggregatorURL string
 	aggregatorKey string
 	verifier      *JWTVerifier
-	slots         chan struct{}
+	limiter       *PriorityLimiter
+	fieldClientID string
 }
 
 func main() {
@@ -55,6 +57,24 @@ func main() {
 		}
 		maxInFlight = value
 	}
+	fieldReserve := 32
+	if raw := os.Getenv("CLIENT_API_FIELD_RESERVED_SLOTS"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 || value >= maxInFlight {
+			logger.Error("configuration_invalid", "error", "CLIENT_API_FIELD_RESERVED_SLOTS must be positive and lower than CLIENT_API_MAX_IN_FLIGHT")
+			os.Exit(1)
+		}
+		fieldReserve = value
+	}
+	fieldClientID := strings.TrimSpace(os.Getenv("FIELD_CLIENT_ID"))
+	if fieldReserve >= maxInFlight {
+		logger.Error("configuration_invalid", "error", "field reserve must be lower than CLIENT_API_MAX_IN_FLIGHT")
+		os.Exit(1)
+	}
+	if fieldClientID == "" {
+		logger.Error("configuration_invalid", "error", "FIELD_CLIENT_ID is required")
+		os.Exit(1)
+	}
 
 	verifier, err := NewJWTVerifier(context.Background(), jwksURL, issuer, audience, logger)
 	if err != nil {
@@ -67,7 +87,8 @@ func main() {
 		aggregatorURL: strings.TrimRight(aggregatorURL, "/"),
 		aggregatorKey: aggregatorKey,
 		verifier:      verifier,
-		slots:         make(chan struct{}, maxInFlight),
+		limiter:       NewPriorityLimiter(maxInFlight, fieldReserve),
+		fieldClientID: fieldClientID,
 	}
 
 	mux := http.NewServeMux()
@@ -90,10 +111,24 @@ func main() {
 		}
 		server.forwardRaw(w, r, "/internal/source-status")
 	}))
+	mux.HandleFunc("GET /unprocessed", server.protect(func(w http.ResponseWriter, r *http.Request) {
+		if !hasScope(claimsFromContext(r.Context()).Scope, scopeOps) {
+			writeBearerError(w, http.StatusForbidden, "insufficient_scope", "ops scope is required", scopeOps)
+			return
+		}
+		server.forwardRaw(w, r, "/internal/unprocessed")
+	}))
+	mux.HandleFunc("GET /polling", server.protect(func(w http.ResponseWriter, r *http.Request) {
+		if !hasScope(claimsFromContext(r.Context()).Scope, scopeOps) {
+			writeBearerError(w, 403, "insufficient_scope", "ops scope is required", scopeOps)
+			return
+		}
+		server.forwardRaw(w, r, "/internal/polling")
+	}))
 
 	httpServer := &http.Server{
 		Addr:              ":8080",
-		Handler:           loggingMiddleware(logger, mux),
+		Handler:           telemetry.Wrap(loggingMiddleware(logger, mux), false),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      35 * time.Second,
@@ -128,15 +163,15 @@ func (s *Server) protect(next http.HandlerFunc) http.HandlerFunc {
 			writeBearerError(w, http.StatusUnauthorized, "invalid_token", "access token is invalid or expired", "")
 			return
 		}
-		select {
-		case s.slots <- struct{}{}:
-			defer func() { <-s.slots }()
-			ctx := context.WithValue(r.Context(), claimsContextKey, claims)
-			next(w, r.WithContext(ctx))
-		default:
+		priority := claims.ClientID == s.fieldClientID
+		if !s.limiter.Acquire(priority) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, "server busy")
+			return
 		}
+		defer s.limiter.Release(priority)
+		ctx := context.WithValue(r.Context(), claimsContextKey, claims)
+		next(w, r.WithContext(ctx))
 	}
 }
 
@@ -243,6 +278,10 @@ func (s *Server) callAggregator(r *http.Request, path string) (*http.Response, t
 	}
 	request.Header.Set("X-Aggregator-Key", s.aggregatorKey)
 	request.Header.Set("X-Correlation-ID", correlationID(r.Context()))
+	// Recompute from signed identity. Do not forward a client-supplied header.
+	if claims := claimsFromContext(r.Context()); claims != nil && claims.ClientID == s.fieldClientID {
+		request.Header.Set("X-Request-Priority", "field")
+	}
 	startedAt := time.Now()
 	response, err := s.client.Do(request)
 	return response, startedAt, err

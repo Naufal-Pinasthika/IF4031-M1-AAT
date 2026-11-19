@@ -20,30 +20,36 @@ import (
 
 // p1 writer lock serializes revisions state lock never spans network I/O
 type Store struct {
-	units    []*unit
-	timeout  time.Duration
-	logger   *slog.Logger
-	writer   sync.Mutex
-	state    sync.RWMutex
-	recovery sync.Mutex
+	units       []*unit
+	timeout     time.Duration
+	logger      *slog.Logger
+	writer      sync.Mutex
+	state       sync.RWMutex
+	recovery    sync.Mutex
+	antiEntropy map[[2]int]string // elected recovery worker only; restart safely rescans
 }
 
 // p1 all mutable fields are guarded by Store.state.
 type unit struct {
 	name                        string
 	pool                        *pgxpool.Pool
+	probe                       *pgxpool.Pool
+	priority                    *pgxpool.Pool
 	online, ready               bool
 	generation                  uint64
 	writes, writeErrors, copied int64
 	writeDuration               time.Duration
 	checkpoint                  string
+	probeTimeouts               int
 }
 
 // p1 a PostgreSQL row carries its internal revision during repair.
 type record struct {
-	event     model.HazardEvent
-	partition int
-	revision  int64
+	event            model.HazardEvent
+	partition        int
+	revision         int64
+	fencingToken     int64
+	ingestionVersion int64
 }
 
 // p1 startup accepts unavailable units existing ready units are reconciled before serving HTTP
@@ -62,14 +68,35 @@ func New(ctx context.Context, configs []config.StorageUnit, timeout time.Duratio
 			s.Close()
 			return nil, fmt.Errorf("invalid storage configuration for %s", cfg.Name)
 		}
-		pc.ConnConfig.Tracer = &postgresTracer{logger: logger}
+		pc.ConnConfig.Tracer = &postgresTracer{logger: logger.With("storage_unit", cfg.Name)}
 		pc.ConnConfig.ConnectTimeout = timeout
 		p, err := pgxpool.NewWithConfig(ctx, pc)
 		if err != nil {
 			s.Close()
 			return nil, fmt.Errorf("create pool for %s", cfg.Name)
 		}
-		u := &unit{name: cfg.Name, pool: p}
+		// A separate small pool prevents regular reads/audits from consuming
+		// every connection needed by the authenticated Field path.
+		priorityConfig := pc.Copy()
+		priorityConfig.MaxConns = 2
+		priorityConfig.MinConns = 0
+		priority, err := pgxpool.NewWithConfig(ctx, priorityConfig)
+		if err != nil {
+			p.Close()
+			s.Close()
+			return nil, fmt.Errorf("create priority pool for %s", cfg.Name)
+		}
+		probeConfig := pc.Copy()
+		probeConfig.MaxConns = 1
+		probeConfig.MinConns = 0
+		probe, err := pgxpool.NewWithConfig(ctx, probeConfig)
+		if err != nil {
+			p.Close()
+			priority.Close()
+			s.Close()
+			return nil, fmt.Errorf("create health pool for %s", cfg.Name)
+		}
+		u := &unit{name: cfg.Name, pool: p, probe: probe, priority: priority}
 		s.units = append(s.units, u)
 		op, cancel := context.WithTimeout(ctx, timeout)
 		err = s.ensureSchema(op, u)
@@ -91,18 +118,32 @@ func New(ctx context.Context, configs []config.StorageUnit, timeout time.Duratio
 		}
 	}
 	if fresh == len(s.units) {
+		// Only genuinely empty first-use volumes can be activated immediately.
+		// Existing volumes are repaired by the elected recovery worker below.
+		empty := true
 		for _, u := range s.units {
-			u.ready = true
+			op, cancel := context.WithTimeout(ctx, timeout)
+			var hasRows bool
+			err := u.pool.QueryRow(op, "SELECT EXISTS(SELECT 1 FROM hazard_events LIMIT 1)").Scan(&hasRows)
+			cancel()
+			empty = empty && err == nil && !hasRows
+		}
+		if empty {
+			for _, u := range s.units {
+				op, cancel := context.WithTimeout(ctx, timeout)
+				_, err := u.pool.Exec(op, "UPDATE p1_metadata SET status='ready' WHERE singleton=true AND status='new'")
+				cancel()
+				u.ready = err == nil
+			}
 		}
 	}
 	if len(s.units) == 1 && s.units[0].online {
 		s.units[0].ready = true
 	}
-	for i, u := range s.units {
-		if u.online {
-			s.recoverUnit(ctx, i, u.ready)
-		}
-	}
+	// Starting an additional read replica must NOT mark healthy shared stores
+	// 'recovering' and recopy the dataset. All nonempty repairs are performed
+	// by RunRecovery after acquiring the shared P1_RECOVERY lease. This also
+	// prevents simultaneous startup/rolling pods from interfering with readers.
 	return s, nil
 }
 
@@ -110,7 +151,30 @@ func New(ctx context.Context, configs []config.StorageUnit, timeout time.Duratio
 func (s *Store) Close() {
 	for _, u := range s.units {
 		u.pool.Close()
+		u.probe.Close()
+		if u.priority != nil {
+			u.priority.Close()
+		}
 	}
+}
+
+// Ping succeeds when at least one canonical storage unit is reachable. Reads
+// can remain explicitly partial while a failed P1 replica is recovering.
+func (s *Store) Ping(ctx context.Context) error {
+	var lastErr error
+	for _, u := range s.units {
+		op, cancel := context.WithTimeout(ctx, s.timeout)
+		err := u.probe.Ping(op)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		return fmt.Errorf("no storage units configured")
+	}
+	return lastErr
 }
 
 // p1
@@ -137,15 +201,71 @@ func availabilityError(err error) bool {
 // p1
 func (s *Store) markDown(u *unit) {
 	s.state.Lock()
+	wasOnline := u.online
 	u.online = false
 	u.ready = false
 	u.generation++
 	u.checkpoint = ""
 	s.state.Unlock()
+	if wasOnline {
+		s.logger.Warn("storage_unit_unreachable", "storage_unit", u.name)
+	}
+}
+
+// A single probe deadline can mean scheduler/pool pressure, not a failed disk.
+// Only ambiguous deadlines require three consecutive observations (5 s cadence).
+// Definitive connection/schema failures and application I/O failures retain the
+// immediate down transition. Reads still attempt bounded live I/O in this window;
+// this does not manufacture a successful response from an unavailable database.
+func (s *Store) noteProbeFailure(ctx context.Context, u *unit, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	if !budgetError(err) {
+		s.markDown(u)
+		return
+	}
+	s.state.Lock()
+	u.probeTimeouts++
+	count := u.probeTimeouts
+	s.state.Unlock()
+	s.logger.Warn("storage_probe_timeout", "storage_unit", u.name, "consecutive", count)
+	if count >= 3 {
+		s.markDown(u)
+	}
+}
+
+// A client's cancellation or exhausted query budget says nothing about disk
+// health. Only the independent probe (which cannot queue behind application
+// traffic) may turn a probe timeout into an availability-state transition.
+func budgetError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err)
+}
+
+func (s *Store) noteIOFailure(u *unit, err error) {
+	if !budgetError(err) {
+		s.markDown(u)
+	}
 }
 
 // p1 source identities determine placement independently of geography
 func (s *Store) Upsert(ctx context.Context, event *model.HazardEvent) error {
+	return s.upsert(ctx, event, 0)
+}
+
+// UpsertAccepted projects ONLY a committed coordinator intent. The immutable
+// admission version protects every replica against delayed/repeated delivery.
+func (s *Store) UpsertAccepted(ctx context.Context, event *model.HazardEvent, version int64) error {
+	if version <= 0 {
+		return fmt.Errorf("positive admission version is required")
+	}
+	if event == nil || event.IngestedAt.IsZero() {
+		return fmt.Errorf("accepted event must have its authoritative ingestion time")
+	}
+	return s.upsert(ctx, event, version)
+}
+
+func (s *Store) upsert(ctx context.Context, event *model.HazardEvent, ingestionVersion int64) error {
 	if event == nil || event.Source == "" || event.SourceRefID == "" {
 		return fmt.Errorf("hazard event source and source_ref_id are required")
 	}
@@ -161,6 +281,9 @@ func (s *Store) Upsert(ctx context.Context, event *model.HazardEvent) error {
 	}
 	var revision int64
 	for _, i := range s.destinations(partition) {
+		if ingestionVersion > 0 {
+			break
+		}
 		u := s.units[i]
 		s.state.RLock()
 		online := u.online
@@ -176,15 +299,19 @@ func (s *Store) Upsert(ctx context.Context, event *model.HazardEvent) error {
 			if !availabilityError(err) {
 				return err
 			}
-			s.markDown(u)
+			s.noteIOFailure(u, err)
 			continue
 		}
 		if rev > revision {
 			revision = rev
 		}
 	}
-	event.IngestedAt = time.Now().UTC()
-	r := record{event: *event, partition: partition, revision: revision + 1}
+	if ingestionVersion == 0 {
+		event.IngestedAt = time.Now().UTC()
+	} else {
+		revision = ingestionVersion - 1
+	}
+	r := record{event: *event, partition: partition, revision: revision + 1, ingestionVersion: ingestionVersion}
 	successes := 0
 	for _, i := range s.destinations(partition) {
 		u := s.units[i]
@@ -208,46 +335,144 @@ func (s *Store) Upsert(ctx context.Context, event *model.HazardEvent) error {
 			if !availabilityError(err) {
 				return err
 			}
-			s.markDown(u)
+			s.noteIOFailure(u, err)
 			continue
 		}
 		successes++
 	}
-	if successes == 0 {
-		return fmt.Errorf("no storage destination accepted event")
+	if successes != len(s.destinations(partition)) {
+		return fmt.Errorf("canonical replication incomplete: %d/%d destinations acknowledged", successes, len(s.destinations(partition)))
 	}
 	return nil
 }
 
+// UpsertAcceptedTarget acknowledges EXACTLY one assigned replica. A timeout,
+// cancellation, unavailable pool, or ambiguous commit always returns an error;
+// the coordinator retains this destination's immutable repair intent. Accepted
+// versions use a database-side guard, not the process-local revision mutex.
+func (s *Store) UpsertAcceptedTarget(ctx context.Context, event *model.HazardEvent, version int64, target string) error {
+	if version <= 0 || event == nil || event.Source == "" || event.SourceRefID == "" || event.IngestedAt.IsZero() {
+		return fmt.Errorf("valid committed event and positive version are required")
+	}
+	if _, err := json.Marshal(event.Attributes); err != nil {
+		return err
+	}
+	partition := partitionFor(string(event.Source), event.SourceRefID)
+	if len(s.units) == 1 {
+		partition = 0
+	}
+	for _, index := range s.destinations(partition) {
+		u := s.units[index]
+		if "canonical:"+u.name != target {
+			continue
+		}
+		event.HazardID = eventID(string(event.Source), event.SourceRefID)
+		started := time.Now()
+		err := s.writeRecord(ctx, u, record{event: *event, partition: partition, revision: version, ingestionVersion: version})
+		s.state.Lock()
+		u.writeDuration += time.Since(started)
+		if err == nil {
+			u.writes++
+		} else {
+			u.writeErrors++
+		}
+		s.state.Unlock()
+		if err != nil && availabilityError(err) {
+			s.noteIOFailure(u, err)
+		}
+		return err
+	}
+	return fmt.Errorf("target %q is not assigned to this event", target)
+}
+
 // p1 revision guard makes copying old rows safe alongside new writes
 func (s *Store) writeRecord(ctx context.Context, u *unit, r record) error {
-	attrs, err := json.Marshal(r.event.Attributes)
-	if err != nil {
-		return err
+	return s.writeRecords(ctx, u, []record{r})
+}
+
+// Repair pages are bounded and committed atomically, rather than paying a
+// network round trip and durable commit for every row. The same version guard
+// is used by live projection, so an old repair cannot overwrite a new intent.
+func (s *Store) writeRecords(ctx context.Context, u *unit, records []record) error {
+	if len(records) == 0 {
+		return nil
+	}
+	if len(records) > 100 {
+		return fmt.Errorf("storage write batch exceeds 100 records")
+	}
+	batch := &pgx.Batch{}
+	for _, r := range records {
+		attrs, err := json.Marshal(r.event.Attributes)
+		if err != nil {
+			return err
+		}
+		e := r.event
+		batch.Queue(writeRecordSQL, e.HazardID, e.Source, e.SourceRefID, e.HazardType, e.Severity, e.AreaName, e.Latitude, e.Longitude, e.OccuredAt, e.IngestedAt, attrs, r.partition, r.revision, r.fencingToken, r.ingestionVersion)
 	}
 	op, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	e := r.event
-	_, err = u.pool.Exec(op, `INSERT INTO hazard_events
- (hazard_id,source,source_ref_id,hazard_type,severity,area_name,latitude,longitude,occurred_at,ingested_at,attributes,partition_id,revision)
- VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
+	tx, err := u.pool.Begin(op)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(op)
+	results := tx.SendBatch(op, batch)
+	if err := results.Close(); err != nil {
+		return err
+	}
+	return tx.Commit(op)
+}
+
+const writeRecordSQL = `INSERT INTO hazard_events
+ (hazard_id,source,source_ref_id,hazard_type,severity,area_name,latitude,longitude,occurred_at,ingested_at,attributes,partition_id,revision,fencing_token,ingestion_version)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15)
  ON CONFLICT (source,source_ref_id) DO UPDATE SET
  hazard_id=EXCLUDED.hazard_id,hazard_type=EXCLUDED.hazard_type,severity=EXCLUDED.severity,
  area_name=EXCLUDED.area_name,latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,
  occurred_at=EXCLUDED.occurred_at,ingested_at=EXCLUDED.ingested_at,attributes=EXCLUDED.attributes,
- partition_id=EXCLUDED.partition_id,revision=EXCLUDED.revision
- WHERE hazard_events.revision < EXCLUDED.revision`, e.HazardID, e.Source, e.SourceRefID, e.HazardType, e.Severity, e.AreaName, e.Latitude, e.Longitude, e.OccuredAt, e.IngestedAt, attrs, r.partition, r.revision)
-	return err
-}
+ partition_id=EXCLUDED.partition_id,revision=EXCLUDED.revision,fencing_token=EXCLUDED.fencing_token,
+ ingestion_version=EXCLUDED.ingestion_version
+ WHERE hazard_events.ingestion_version < EXCLUDED.ingestion_version
+ OR (hazard_events.ingestion_version = EXCLUDED.ingestion_version AND hazard_events.revision < EXCLUDED.revision)`
 
 // new P1 volumes only existing M1 data requires explicit migration.
 func (s *Store) ensureSchema(ctx context.Context, u *unit) error {
-	_, err := u.pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS hazard_events (
+	// ALTER TABLE takes an ACCESS EXCLUSIVE lock even when ADD COLUMN IF NOT
+	// EXISTS is a no-op. A new read replica must not queue DDL ahead of live
+	// requests on an already current schema. Keep this probe in sync with
+	// future schema versions; missing tables/columns still take the migration.
+	rows, probeErr := u.pool.Query(ctx, `SELECT partition_id,revision,fencing_token,ingestion_version FROM hazard_events LIMIT 0`)
+	if probeErr == nil {
+		rows.Close()
+		var name string
+		probeErr = u.pool.QueryRow(ctx, `SELECT unit_name FROM p1_metadata WHERE singleton=true`).Scan(&name)
+		if probeErr == nil && name == u.name {
+			return nil
+		}
+	}
+	if probeErr != nil && !errors.Is(probeErr, pgx.ErrNoRows) {
+		var postgresError *pgconn.PgError
+		if !errors.As(probeErr, &postgresError) || (postgresError.Code != "42P01" && postgresError.Code != "42703") {
+			return probeErr
+		}
+	}
+	tx, err := u.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(40310004)`); err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `CREATE TABLE IF NOT EXISTS hazard_events (
  hazard_id TEXT NOT NULL UNIQUE,source TEXT NOT NULL,source_ref_id TEXT NOT NULL,
  hazard_type TEXT NOT NULL,severity TEXT NOT NULL,area_name TEXT NOT NULL,
  latitude DOUBLE PRECISION NOT NULL,longitude DOUBLE PRECISION NOT NULL,
  occurred_at TIMESTAMPTZ NOT NULL,ingested_at TIMESTAMPTZ NOT NULL,attributes JSONB NOT NULL DEFAULT '{}',
- partition_id INTEGER NOT NULL,revision BIGINT NOT NULL,PRIMARY KEY(source,source_ref_id));
+ partition_id INTEGER NOT NULL,revision BIGINT NOT NULL,fencing_token BIGINT NOT NULL DEFAULT 0,
+ PRIMARY KEY(source,source_ref_id));
+ ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS fencing_token BIGINT NOT NULL DEFAULT 0;
+ ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS ingestion_version BIGINT NOT NULL DEFAULT 0;
  CREATE INDEX IF NOT EXISTS p1_occurred ON hazard_events(partition_id,occurred_at,hazard_id);
  CREATE INDEX IF NOT EXISTS p1_ingested ON hazard_events(partition_id,ingested_at,hazard_id);
  CREATE TABLE IF NOT EXISTS p1_metadata (singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK(singleton),
@@ -257,6 +482,8 @@ func (s *Store) ensureSchema(ctx context.Context, u *unit) error {
 	if err != nil {
 		return err
 	}
-	_, err = u.pool.Exec(ctx, "UPDATE p1_metadata SET unit_name=$1 WHERE singleton=true", u.name)
-	return err
+	if _, err = tx.Exec(ctx, "UPDATE p1_metadata SET unit_name=$1 WHERE singleton=true", u.name); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

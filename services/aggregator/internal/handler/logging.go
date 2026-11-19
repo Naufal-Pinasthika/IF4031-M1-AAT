@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/correlation"
+	metric "github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/metrics"
 )
 
 type statusWriter struct {
@@ -35,14 +36,29 @@ func Logging(logger *slog.Logger, next http.Handler) http.Handler {
 		ctx := correlation.WithID(r.Context(), correlationID)
 		wrapped := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		startedAt := time.Now()
-		next.ServeHTTP(wrapped, r.WithContext(ctx))
+		observed := r.WithContext(ctx)
+		next.ServeHTTP(wrapped, observed)
+		duration := time.Since(startedAt)
+		// Request IDs belong in logs/traces, never in metric labels. Arbitrary
+		// /events/{id} and unmatched URLs otherwise grow this map forever.
+		route := observed.Pattern
+		if route == "" {
+			route = "unmatched"
+		}
+		method := r.Method
+		switch method {
+		case "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS":
+		default:
+			method = "OTHER"
+		}
+		metric.Default.HTTP(method, route, wrapped.status, duration)
 		logger.Info(
 			"http_request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", wrapped.status,
 			"correlation_id", correlationID,
-			"latency_ms", time.Since(startedAt).Milliseconds(),
+			"latency_ms", duration.Milliseconds(),
 		)
 	})
 }

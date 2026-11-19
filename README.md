@@ -2,6 +2,17 @@
 
 > Distributed hazard ingestion and coordination platform for IF4031
 
+## VPS deployment (M2)
+
+The three-node Biznet deployment, existing-server provisioning, encrypted node
+network, one-command deployment, access tunnel and verification are documented
+in [infra/vps/README.md](infra/vps/README.md). Builds run on VPS A, not the laptop.
+The VPS deployment starts fresh; old local test data was explicitly discarded.
+
+The source-to-notifier measurement boundary and private operations dashboard are
+documented in [P5 observability](docs/P5-observability.md). HA has been deferred:
+coordinator/Kafka/notifier use the pre-replication singleton topology.
+
 <p align="center">
   A distributed hazard-ingestion and coordination platform connecting BMKG,
   PVMBG, BNPB clients, and independent event consumers.
@@ -303,6 +314,13 @@ curl -fsS \
 | Dashboard | `GET /events`, `GET /stats` | None, demo endpoint | Consumer state |
 | Notifier | `GET /health` | None | Consumer/Kafka health |
 | Notifier | `GET /notifications`, `GET /stats` | None, demo endpoint | Consumer state |
+
+`GET /notifications` returns at most 500 entries by default (`limit=1..1000`).
+Follow `next_cursor` using `?limit=1000&cursor=...` until it is absent to inspect
+the full history. Pages follow the persistent domain-key order, not newest-first
+order. This is a live traversal, not a cross-request snapshot: concurrent inserts
+before a cursor are visible on the next fresh traversal. No historical data is
+deleted. `/stats` still scans the full history and is not a bounded-cost endpoint.
 
 `GET /events` accepts `source`, `hazard_type`, `severity`, `from`, `to`,
 `limit`, `offset`, and `fields`. The `fields` parameter is authorized by the
@@ -1195,6 +1213,279 @@ docker compose down -v
 > [!CAUTION]
 > `docker compose down -v` permanently deletes canonical events, Auth refresh
 > sessions, Kafka data and offsets, dashboard state, and notifier state.
+
+## Milestone 2 — Problem 2 dan Problem 5
+
+Bagian ini mendokumentasikan implementasi P2 (*Dua Nakhoda, Satu Kapal*) dan
+P5 (*Pelampung yang Berbohong*). Keduanya tetap memakai penyimpanan
+terdistribusi P1, Audit API, Kafka, autentikasi M1, dan kontrak sumber lain.
+
+Analisis ulang seluruh spesifikasi, perubahan desain terbaru, trade-off, hasil
+regresi, serta kriteria yang belum terbukti tersedia di
+[M2 P2/P5 design review](docs/M2-P2-P5-design-review.md).
+The [published verification status](docs/README.md) records the current build,
+retained failures and remaining evidence gaps. Dated operator reports and raw
+run artifacts stay local rather than cluttering the remote repository.
+
+Durable polling ledger, schema-v2 migration/rollback constraints and the
+upstream-log checker are documented in the
+[P2 polling guide](docs/P2-polling-ledger.md).
+
+### Desain P2: Aggregator Aktif-Tunggu dengan Fencing
+
+Deployment menjalankan tiga replika Aggregator di belakang satu Kubernetes
+Service. `readinessProbe` memakai `/ready`, sehingga Service berhenti
+mengarahkan permintaan ke pod yang kehilangan seluruh penyimpanan kanonik.
+Gangguan coordinator menghentikan penerimaan data baru, sementara pod yang
+sudah berjalan tetap dapat melayani pembacaan data kanonik. `PodDisruptionBudget`, *topology spread*, dan strategi
+`RollingUpdate` menjaga ketersediaan ketika replika diubah atau versi diganti.
+
+GET daftar event biasa memakai read-side dengan penggabungan request bersamaan
+dan cache terbatas, dengan TTL bawaan 100 ms sejak pembacaan dimulai. Seluruh
+filter publik menjadi bagian dari kunci cache; respons parsial/error tidak
+disimpan. Audit API tetap membaca langsung. Konsekuensinya, pembacaan biasa
+dapat tertinggal hingga TTL tersebut, sedangkan audit tidak memakai cache ini.
+
+Skema coordinator mempunyai penanda versi yang disimpan atomik bersama migrasi.
+Pod baru pada database yang sudah mutakhir cukup membaca penanda, tanpa
+mengulang DDL atau menunggu lock migrasi. Database lama tanpa penanda tetap
+dimigrasikan; versi skema yang tidak didukung ditolak, bukan diturunkan.
+Kegagalan koneksi sementara saat startup dicoba ulang secara terbatas.
+
+Setiap sumber (`BMKG`, `PVMBG`, dan `SENSOR_PANTAI`) mempunyai lease tersendiri.
+Lease disimpan di PostgreSQL `aggregator-coordinator` dan seluruh keputusan
+kedaluwarsa memakai `clock_timestamp()` database, bukan jam pod. Pergantian
+pemilik atau perolehan ulang lease yang sudah habis menaikkan *fencing token*.
+Pembaruan lease berjalan setiap TTL/3 (bawaan lima detik) selama batch diproses.
+Pembaruan harus mencocokkan holder, token, dan lease yang masih berlaku;
+kegagalan membatalkan konteks polling dan pemrosesan batch.
+
+Jalur penulisan memakai **admission transaksional dan outbox**:
+
+Schema v3 update (build `10-replication`): delivery acknowledgements, retries,
+and per-identity ordering are now independent for Kafka and **each assigned
+canonical replica**. The payload is cleared only after all targets acknowledge.
+Reads reconcile both replicas; ready-store anti-entropy repairs historical gaps.
+See [the schema/cutover guide](docs/P2-polling-ledger.md) and
+[verification status](docs/README.md).
+
+Build 11 follow-up: read completeness now uses a bounded prefix-coverage proof;
+reachable replica lag is reported separately as `replication_degraded`. Failed
+reads or uncertified filtered pages remain partial. See the
+[P2.7/P2.8 verification status and retained failures](docs/README.md).
+
+1. `AcceptEvent` mengunci baris lease dan memeriksa holder, token, serta waktu
+   database, kemudian menyimpan intent event ke `ingestion_outbox` dalam
+   transaksi PostgreSQL yang sama. Poller tidak menulis langsung ke P1/Kafka.
+2. Transaksi yang ditinggalkan klien dibatasi `statement_timeout` dan
+   `idle_in_transaction_session_timeout` pada server (bawaan dua detik).
+   Klien yang bangun dengan transaksi yang sudah dibatalkan tidak dapat commit.
+3. Worker mengirim intent yang sudah sah ke shard P1 dan Kafka. Setiap intent
+   memiliki `ingestion_version` yang persisten. UPSERT P1 dan dashboard consumer
+   mengabaikan versi yang lebih lama atau sudah diterapkan.
+4. Acknowledgement disimpan setelah pengiriman berhasil. Kegagalan di tengah
+   pengiriman mengulang versi yang sama, dengan backoff 100 ms sampai lima detik.
+   Payload outbox dibersihkan setelah acknowledgement; metadata dipertahankan.
+
+Validasi lease dan penerimaan intent mempunyai satu titik keputusan atomik;
+tidak ada celah antara pemeriksaan lease di aplikasi dan penulisan event baru.
+Penguncian baris mengikuti [kontrak transaksi PostgreSQL](https://www.postgresql.org/docs/16/explicit-locking.html#LOCKING-ROWS).
+Worker yang melanjutkan pengiriman intent lama hanya mengulang pekerjaan yang
+sudah diterima secara sah, bukan menerima input baru menggunakan lease lama.
+Tidak ada klaim transaksi atomik lintas PostgreSQL dan Kafka: pengiriman outbox
+bersifat *at-least-once*, dengan penanganan idempoten di tujuan.
+
+Cursor sumber disimpan hanya setelah seluruh item batch diterima secara
+persisten ke outbox. Pengiriman ke P1/Kafka dapat menyusul. Batch yang dibaca
+ulang dideduplikasi menggunakan identitas event dan fingerprint isi; kegagalan
+query cursor menghasilkan error, bukan dianggap cursor kosong. Cursor waktu
+tidak dapat bergerak mundur dan perubahan cursor dikunci terhadap takeover.
+Pemisahan lease dan worker pengiriman per sumber mengisolasi sumber yang lambat.
+
+Nilai bawaan lease adalah 15 detik. Nilai ini memberi ruang lebih dari dua kali
+timeout HTTP Aggregator, tetapi masih memungkinkan pengambilalihan jauh di bawah
+batas 60 detik dalam kondisi coordinator/jaringan yang tersedia. Database
+koordinasi ditempatkan pada control plane. Pembatasan gangguan hanya pada worker
+non-control-plane berlaku pada topologi dua node; pada tiga VPS, node A tidak
+boleh diasumsikan bebas gangguan. Kehilangan disk coordinator belum ditangani.
+Coordinator saat ini **belum HA**; pending intent juga bergantung pada disk
+tersebut. HA coordinator memerlukan rancangan replikasi/failover tersendiri.
+
+Setiap HTTP request upstream memvalidasi lease lagi, termasuk request kedua
+BMKG. Hal ini mencegah request yang sudah diketahui stale. Namun, proses masih
+dapat freeze setelah validasi dan sebelum paket HTTP dikirim. Tanpa dukungan
+fencing atau idempotency pada upstream, sistem tidak dapat menjamin bahwa
+request HTTP fisik sama sekali tidak pernah terulang pada semua kemungkinan
+freeze/jaringan. Log upstream dan pengujian gangguan tetap diperlukan untuk
+menilai kriteria P2.2; deduplikasi penyimpanan tidak membuktikan syarat tersebut.
+
+### Desain P5: Isolasi, Circuit Breaker, dan Quarantine
+
+Sensor Pantai memakai image dan digest resmi berikut tanpa modifikasi:
+
+```text
+sustuna/sensor-pantai@sha256:51fbd90d3891ad6e9f5768ad330ffb65205644cb29e50da65c7538f2e0b4397d
+```
+
+Manifest mengikuti [contoh resmi Sensor Pantai](https://raw.githubusercontent.com/susTuna/if4031-sensor-pantai/772f2c6a58b5eab786c718ead5d7b1541760f517/manifest.yaml).
+Token berada di Secret `pantai-token`; profil, seed, dan kecepatan berada di
+ConfigMap. Secret opsional `pantai-key` dapat dibuat untuk profil ujian.
+
+Adapter Sensor Pantai mempunyai HTTP client, timeout, dan goroutine terpisah
+dari BMKG/PVMBG. Respons dibatasi 4 MiB dan setiap stasiun serta observasi
+divalidasi. Item yang melanggar kontrak tidak menjadi `HazardEvent`; payload
+aslinya disimpan di `unprocessed_messages` bersama alasan, jumlah percobaan, dan
+status. Data ini tersedia melalui Audit API dan endpoint khusus Ops.
+
+Tiga kegagalan berurutan membuka *circuit breaker* selama dua detik. Saat
+terbuka, tidak ada permintaan baru ke sensor. Setelah masa tunggu, hanya satu
+probe *half-open* yang diizinkan. Jam simulasi Sensor Pantai berbeda dari jam
+host. Karena itu, watermark `generated_at` dan waktu terakhir kemajuannya
+disimpan di database koordinasi. Timestamp yang mundur atau tidak maju selama
+30 detik dianggap tidak sehat, meskipun HTTP menjawab 200. Durasi stagnasi
+memakai jam database, bukan jam pod. Offset absolut pada sampel pertama tidak
+dapat diketahui dari kontrak ini saja; sampel pertama membentuk baseline.
+
+Observasi valid dipetakan menjadi `HazardEvent` dengan `source=SENSOR_PANTAI`
+dan `hazard_type=COASTAL`. Observasi kritis memakai severity `AWAS`, langsung
+dikirim melalui outbox ke Kafka, dan dicatat secara idempoten oleh notifier.
+Satu halaman diterima dalam satu transaksi batch berpagar lease. Pengiriman
+event kritis mendahului antrean normal, dengan urutan versi per identitas tetap
+terjaga. Endpoint `/stats` dan `/metrics` notifier melaporkan jumlah event kritis,
+p95 publikasi-ke-notifier, serta p95 admission-ke-notifier untuk alert pantai.
+`source_latency_ms` bernilai `null` untuk Sensor Pantai: mengurangi timestamp
+simulasi dari jam host akan menghasilkan angka yang tidak bermakna.
+
+Client API mencadangkan kapasitas khusus Tim Lapangan. Media hanya dapat memakai
+kapasitas bersama, sedangkan Tim Lapangan dapat memakai kapasitas bersama dan
+cadangan. Saat jenuh, Media menerima 429 dengan cepat tanpa menghabiskan slot
+Tim Lapangan.
+
+Prioritas kini diteruskan dari identitas JWT yang terverifikasi ke Aggregator,
+bukan dari header client. Aggregator mencadangkan slot HTTP, slot pengisian
+cache, serta dua koneksi baca per unit storage untuk Tim Lapangan. Pengiriman
+canonical dan Kafka berjalan independen; outbox baru diakui setelah keduanya
+berhasil. Notifier mengulang pesan/commit yang gagal sebelum mengambil offset
+berikutnya agar kegagalan tidak terlewati oleh commit yang lebih baru.
+
+Target keandalan jalur peringatan Tim Lapangan adalah:
+
+- 100% observasi kritis valid diterima notifier;
+- p95 ketersediaan alert di sumber sampai notifier paling lama 5 detik; dan
+- tidak ada duplikat notifikasi untuk identitas event dan severity yang sama.
+
+### Konfigurasi P2/P5
+
+| Variabel | Bawaan | Fungsi |
+|---|---:|---|
+| `COORDINATION_DATABASE_URL` | wajib | Database lease, cursor, outbox, dan quarantine |
+| `AGGREGATOR_LEASE_TTL_MS` | `15000` | Masa berlaku lease berdasarkan waktu database |
+| `COORDINATION_TIMEOUT_MS` | `2000` | Batas operasi database koordinasi |
+| `AGGREGATOR_FIELD_RESERVED_SLOTS` | `16` | Cadangan Tim Lapangan dari total 64 slot Aggregator; 0 menonaktifkan cadangan |
+| `AGGREGATOR_READ_CACHE_TTL_MS` | `100` | TTL read-side GET biasa, rentang 0–1000 ms; 0 menonaktifkan cache; Audit API tidak memakai cache |
+| `COASTAL_URL` | `http://sensor-pantai:8080` | Alamat Sensor Pantai |
+| `PANTAI_AUTH_TOKEN` | wajib | Bearer token Sensor Pantai |
+| `COASTAL_POLL_INTERVAL_MS` | `500` | Interval pengambilan observasi |
+| `COASTAL_HTTP_TIMEOUT_MS` | `1000` | Batas satu permintaan sensor |
+| `COASTAL_MAX_STALENESS_MS` | `30000` | Batas durasi tanpa kemajuan jam sumber |
+| `COASTAL_CIRCUIT_FAILURES` | `3` | Kegagalan sebelum circuit terbuka |
+| `COASTAL_CIRCUIT_OPEN_MS` | `2000` | Durasi circuit terbuka |
+| `CLIENT_API_FIELD_RESERVED_SLOTS` | `32` | Slot khusus Tim Lapangan dari total 64 |
+
+### Menjalankan dan Membuktikan
+
+Siapkan Secret dan deploy seluruh sistem dari kondisi awal:
+
+```bash
+bash scripts/setup-env.sh
+bash scripts/deploy-k8s.sh --k3s --build --push \
+  --image-prefix docker.io/<pengguna>
+```
+
+Jika `.env` dari M1/P1 masih dipakai, tambahkan hanya variabel yang belum ada
+tanpa mengganti kredensial lama:
+
+```bash
+bash scripts/setup-env.sh --merge
+```
+
+Untuk profil ujian Sensor Pantai, ubah `PANTAI_PROFILE=exam`, buat Secret kunci,
+kemudian deploy ulang:
+
+```bash
+kubectl -n sistem-informasi-kebencanaan-bnpb create secret generic pantai-key \
+  --from-file=key=/lokasi/berkas-key
+```
+
+Untuk smoke manual, jalankan port-forward pada terminal terpisah. Port-forward
+Service memilih satu pod: jangan gunakan jalur ini sebagai bukti distribusi
+beban 1-vs-3 atau scaling. Untuk load test VPS, gunakan common Service melalui
+WireGuard sesuai [panduan VPS](infra/vps/README.md).
+
+```bash
+kubectl -n sistem-informasi-kebencanaan-bnpb port-forward service/aggregator 8083:8083
+kubectl -n sistem-informasi-kebencanaan-bnpb port-forward service/client-api 8080:8080
+kubectl -n sistem-informasi-kebencanaan-bnpb port-forward service/notifier-consumer 8086:8086
+kubectl -n sistem-informasi-kebencanaan-bnpb port-forward service/sensor-pantai 8090:8080
+```
+
+Skrip demonstrasi sudah dipisahkan dan diberi nomor:
+
+```bash
+bash scripts/m2/p2/01-topology-and-health.sh
+bash scripts/m2/p2/02-leader-failover.sh BMKG
+bash scripts/m2/p2/03-tester-scenario.sh <nama-skenario-practice>
+bash scripts/m2/p2/04-scale-3-5-2.sh
+bash scripts/m2/p2/05-rolling-update.sh <image-aggregator:tag>
+bash scripts/m2/p2/06-throughput-1-vs-3.sh
+
+bash scripts/m2/p5/01-sensor-contract.sh
+bash scripts/m2/p5/02-circuit-recovery.sh
+bash scripts/m2/p5/03-audit-unprocessed.sh
+bash scripts/m2/p5/04-notifier-latency.sh
+```
+
+Setiap permintaan cURL pada skrip mencetak `http_code` dan `time_total`.
+Load test P2 dijalankan dari luar pod aplikasi dan dipertahankan pada 10.000 VU
+selama 120 detik:
+
+```bash
+k6 run -e AGGREGATOR_BASE_URL=http://127.0.0.1:8083 \
+  -e AGGREGATOR_API_KEY="$AGGREGATOR_API_KEY" scripts/m2/p2/load.js
+```
+
+Jalankan `04-scale-3-5-2.sh` selama k6 berlangsung. Uji prioritas P5 memakai
+access token Media dan Tim Lapangan:
+
+```bash
+k6 run -e MEDIA_ACCESS_TOKEN="$MEDIA_ACCESS_TOKEN" \
+  -e FIELD_ACCESS_TOKEN="$FIELD_ACCESS_TOKEN" scripts/m2/p5/05-priority-load.js
+```
+
+Bukti akhir tetap harus diambil pada cluster demo minimal dua node dengan kernel
+terpisah. Unit test dan manifest tidak menggantikan hasil Tester Agent, log
+upstream, tangkapan dashboard, checksum Audit API, atau hasil load test aktual.
+
+Pengujian regresi PostgreSQL tersedia untuk pemilihan serentak, pemilik lama yang
+freeze setelah validasi, perolehan ulang epoch, kegagalan cursor, retry outbox,
+transaksi yang ditinggalkan, dan pengiriman versi yang terbalik. Gunakan database
+pengujian yang dapat dijangkau dari proses Go; setiap test memakai schema acak
+dan menghapus hanya schema miliknya saat selesai:
+
+```bash
+P2_TEST_DATABASE_URL='postgres://postgres:<password>@127.0.0.1:5432/lease_test?sslmode=disable' \
+  go test -count=1 -v ./services/aggregator/internal/store
+go test ./services/aggregator/internal/aggregator ./services/dashboard-consumer/internal/store
+```
+
+Tanpa `P2_TEST_DATABASE_URL`, test integrasi PostgreSQL ditandai *skip*.
+
+Validasi perbaikan pada 18 November 2026: delapan test integrasi tersebut lulus
+pada PostgreSQL 16.16, termasuk fault injection timeout di tengah admission.
+Seluruh test service dan `go vet` Aggregator/dashboard consumer juga lulus.
+Hasil ini belum menggantikan beban 10.000 VU dan seluruh skenario ujian.
+Catatan pengujian tiga VM, hasil aktual, serta batas validasinya tersedia pada
+[`scripts/m2/e2e/README.md`](scripts/m2/e2e/README.md).
 
 ---
 

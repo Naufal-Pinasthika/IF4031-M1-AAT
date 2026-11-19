@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/notifier-consumer/internal/telemetry"
 	"log/slog"
 	"net/http"
 	"os"
@@ -36,7 +37,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
-		Handler:           httpapi.New(notificationStore, streamConsumer, logger, cfg.HealthTimeout),
+		Handler:           telemetry.Wrap(httpapi.New(notificationStore, streamConsumer, logger, cfg.HealthTimeout), true),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      10 * time.Second,

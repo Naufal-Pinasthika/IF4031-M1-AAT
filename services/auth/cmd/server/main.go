@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/auth/internal/telemetry"
 	"log/slog"
 	"net/http"
 	"os"
@@ -56,7 +57,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
-		Handler:           handler.Logging(logger, handler.Limit(cfg.MaxInFlight, mux)),
+		Handler:           telemetry.Wrap(handler.Logging(logger, handler.Limit(cfg.MaxInFlight, mux)), false),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,

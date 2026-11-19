@@ -18,6 +18,7 @@ SECRET_KEYS = (
     "BMKG_API_KEY", "PVMBG_TOKEN", "AGGREGATOR_API_KEY", "POSTGRES_ADMIN_PASSWORD",
     "POSTGRES_APP_PASSWORD", "AUTH_POSTGRES_PASSWORD", "AUTH_JWT_PRIVATE_KEY_B64",
     "MEDIA_CLIENT_SECRET", "FIELD_CLIENT_SECRET", "OPS_CLIENT_SECRET",
+    "PANTAI_AUTH_TOKEN", "COORDINATOR_POSTGRES_PASSWORD",
     # p1
     "P1_AUDIT_TOKEN",
 )
@@ -25,15 +26,19 @@ CONFIG_KEYS = {
     "bmkg": ("BMKG_EVENT_INTERVAL_MS",),
     "pvmbg": ("PVMBG_EVENT_INTERVAL_MS", "PVMBG_DELAY_MIN_MS", "PVMBG_DELAY_MAX_MS"),
     "aggregator": ("KAFKA_TOPIC", "AGGREGATOR_POLL_INTERVAL_MS", "AGGREGATOR_HTTP_TIMEOUT_MS",
-                   "AGGREGATOR_MAX_IN_FLIGHT", "AGGREGATOR_START_SINCE",
+                   "AGGREGATOR_MAX_IN_FLIGHT", "AGGREGATOR_FIELD_RESERVED_SLOTS", "AGGREGATOR_READ_CACHE_TTL_MS", "AGGREGATOR_START_SINCE", "AGGREGATOR_LEASE_TTL_MS",
+                   "COORDINATION_TIMEOUT_MS", "COASTAL_POLL_INTERVAL_MS", "COASTAL_HTTP_TIMEOUT_MS",
+                   "COASTAL_MAX_STALENESS_MS", "COASTAL_CIRCUIT_FAILURES", "COASTAL_CIRCUIT_OPEN_MS",
                    # p1
                    "P1_STORE_TIMEOUT_MS", "P1_IMPORT_ONLY"),
     "auth": ("AUTH_ACCESS_TOKEN_TTL_SECONDS", "AUTH_REFRESH_TOKEN_TTL_SECONDS", "AUTH_MAX_IN_FLIGHT",
              "AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "AUTH_JWT_KEY_ID", "MEDIA_CLIENT_ID",
              "FIELD_CLIENT_ID", "OPS_CLIENT_ID"),
-    "client-api": ("AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "CLIENT_API_MAX_IN_FLIGHT"),
+    "client-api": ("AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "CLIENT_API_MAX_IN_FLIGHT",
+                   "CLIENT_API_FIELD_RESERVED_SLOTS", "FIELD_CLIENT_ID"),
     "dashboard-consumer": ("KAFKA_TOPIC", "DASHBOARD_CONSUMER_GROUP"),
     "notifier-consumer": ("KAFKA_TOPIC", "NOTIFIER_CONSUMER_GROUP"),
+    "sensor-pantai": ("PANTAI_PROFILE", "PANTAI_SEED", "PANTAI_SPEED"),
 }
 
 
@@ -80,6 +85,7 @@ def runtime_resources(values):
 
     configs = {name: {key: values[key] for key in keys} for name, keys in CONFIG_KEYS.items()}
     configs["aggregator"].update({"BMKG_URL": "http://bmkg:8081", "PVMBG_URL": "http://pvmbg:8082",
+                                  "COASTAL_URL": "http://sensor-pantai:8080",
                                   "KAFKA_BROKERS": "kafka:9092", "AGGREGATOR_LISTEN_ADDRESS": ":8083"})
     configs["auth"]["AUTH_LISTEN_ADDRESS"] = ":8084"
     configs["client-api"].update({"AGGREGATOR_URL": "http://aggregator:8083",
@@ -95,6 +101,8 @@ def runtime_resources(values):
                            "PGDATA": "/var/lib/postgresql/data/pgdata"}
     configs["auth-postgres"] = {"POSTGRES_DB": "auth", "POSTGRES_USER": "auth_app",
                                 "PGDATA": "/var/lib/postgresql/data/pgdata"}
+    configs["aggregator-coordinator"] = {"POSTGRES_DB": "coordination", "POSTGRES_USER": "aggregator_coord",
+                                          "PGDATA": "/var/lib/postgresql/data/pgdata"}
     configs["kafka-init"] = {"KAFKA_TOPIC": topic}
 
     secrets = {
@@ -103,10 +111,11 @@ def runtime_resources(values):
         "postgres": {"POSTGRES_PASSWORD": values["POSTGRES_ADMIN_PASSWORD"],
                      "POSTGRES_APP_PASSWORD": values["POSTGRES_APP_PASSWORD"]},
         "auth-postgres": {"POSTGRES_PASSWORD": values["AUTH_POSTGRES_PASSWORD"]},
-        "aggregator": {key: values[key] for key in ("BMKG_API_KEY", "PVMBG_TOKEN", "AGGREGATOR_API_KEY", "P1_AUDIT_TOKEN")},
+        "aggregator": {key: values[key] for key in ("BMKG_API_KEY", "PVMBG_TOKEN", "PANTAI_AUTH_TOKEN", "AGGREGATOR_API_KEY", "P1_AUDIT_TOKEN")},
         "auth": {key: values[key] for key in ("AUTH_JWT_PRIVATE_KEY_B64", "MEDIA_CLIENT_SECRET",
                                               "FIELD_CLIENT_SECRET", "OPS_CLIENT_SECRET")},
         "client-api": {"AGGREGATOR_API_KEY": values["AGGREGATOR_API_KEY"]},
+        "aggregator-coordinator": {"POSTGRES_PASSWORD": values["COORDINATOR_POSTGRES_PASSWORD"]},
     }
     # p1: stable Services replace pod IPs and the legacy single database URL.
     for letter in "ABC":
@@ -114,12 +123,17 @@ def runtime_resources(values):
             f"postgres://{quote(values['POSTGRES_APP_USER'], safe='')}:{quote(values['POSTGRES_APP_PASSWORD'], safe='')}"
             f"@postgres-{letter.lower()}:5432/aggregator?sslmode=disable"
         )
+    secrets["aggregator"]["COORDINATION_DATABASE_URL"] = (
+        f"postgres://aggregator_coord:{quote(values['COORDINATOR_POSTGRES_PASSWORD'], safe='')}"
+        "@aggregator-coordinator:5432/coordination?sslmode=disable"
+    )
     secrets["auth"]["AUTH_DATABASE_URL"] = (
         f"postgres://auth_app:{quote(values['AUTH_POSTGRES_PASSWORD'], safe='')}"
         "@auth-postgres:5432/auth?sslmode=disable"
     )
     result = [resource("ConfigMap", f"{name}-config", data) for name, data in configs.items()]
     result += [resource("Secret", f"{name}-credentials", data) for name, data in secrets.items()]
+    result.append(resource("Secret", "pantai-token", {"token": values["PANTAI_AUTH_TOKEN"]}))
     result.append(resource("ConfigMap", "postgres-init", {
         "01-create-aggregator-user.sh": (ROOT / "services/database/init/01-create-aggregator-user.sh").read_text(),
     }))
@@ -127,6 +141,8 @@ def runtime_resources(values):
     result.append(resource("ConfigMap", "p1-storage-scripts", {
         "p1-storage-start.sh": (ROOT / "services/database/p1-storage-start.sh").read_text(),
     }))
+    from observability_resources import resources as observability_resources
+    result += observability_resources(values.get('_IMAGE_PREFIX','aat'), values.get('_IMAGE_TAG','m2-dev'))
     return result
 
 
@@ -153,6 +169,7 @@ def main():
     try:
         values = read_env(ROOT / ".env.example")
         values.update(read_env(args.env_file))
+        values.update(_IMAGE_PREFIX=args.image_prefix.rstrip('/'), _IMAGE_TAG=args.image_tag)
         runtime = runtime_resources(values)
         if args.existing_secrets:
             raw = args.existing_secrets.read_text().strip()
