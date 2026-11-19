@@ -9,7 +9,7 @@ body{font:15px system-ui;background:#0e1420;color:#e4e9f0;max-width:1280px;margi
 <h2>Request / event trace</h2><p class="muted">Enter X-Correlation-ID (e.g. a Client API request ID or poll-SENSOR_PANTAI-…). Shows retained structured logs and duration per recorded step. Empty or missing spans are not interpreted as success; official source/broker internals remain black boxes.</p>
 <input id="correlation" placeholder="Correlation ID" maxlength="128"><button onclick="lookup()">Inspect trace</button><p id="coverage" class="muted"></p><div id="trace"></div><pre id="errors" class="warn"></pre>
 <script>
-const names=['aggregator','auth','client-api','bmkg','pvmbg','dashboard-consumer','notifier-consumer'];
+const names=['aggregator','aggregator-gateway','auth','client-api','bmkg','pvmbg','dashboard-consumer','notifier-consumer'];
 const el=id=>document.getElementById(id),safe=s=>String(s??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function json(url){const r=await fetch(url);if(!r.ok)throw Error('HTTP '+r.status+' '+url.split('?')[0]);return r.json()}
 async function q(expr){const x=await json('/api/query?query='+encodeURIComponent(expr));return x.data?.result||[]}

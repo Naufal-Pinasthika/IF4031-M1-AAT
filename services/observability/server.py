@@ -17,7 +17,7 @@ import urllib.request
 NS=os.environ.get('POD_NAMESPACE','sistem-informasi-kebencanaan-bnpb')
 SA=Path('/var/run/secrets/kubernetes.io/serviceaccount')
 CONTEXT=ssl.create_default_context(cafile=str(SA/'ca.crt')) if SA.exists() else None
-PORTS={'aggregator':8083,'auth':8084,'client-api':8080,'bmkg':8081,'pvmbg':8082,'dashboard-consumer':8085,'notifier-consumer':8086,'sensor-pantai':8080}
+PORTS={'aggregator':8083,'aggregator-gateway':8083,'auth':8084,'client-api':8080,'bmkg':8081,'pvmbg':8082,'dashboard-consumer':8085,'notifier-consumer':8086,'sensor-pantai':8080}
 ALLOWED={'time','timestamp','level','msg','service','correlation_id','method','path','status','latency_ms',
          'pipeline_latency_ms','ingress_latency_ms','duration_ms','hazard_id','source','storage_unit','operation',
          'partition','offset','topic','message_id','error','delivered','applied','events','invalid','sql_operation'}

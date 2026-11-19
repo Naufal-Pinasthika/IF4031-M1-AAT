@@ -28,7 +28,7 @@ scrape_configs:
           names: [sistem-informasi-kebencanaan-bnpb]
     relabel_configs:
       - source_labels: [__meta_kubernetes_pod_label_app]
-        regex: aggregator|auth|client-api|bmkg|pvmbg|dashboard-consumer|notifier-consumer
+        regex: aggregator|aggregator-gateway|auth|client-api|bmkg|pvmbg|dashboard-consumer|notifier-consumer
         action: keep
       - source_labels: [__meta_kubernetes_pod_container_port_name]
         regex: http
