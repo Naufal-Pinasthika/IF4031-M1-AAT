@@ -8,7 +8,7 @@ memory, database state and acceptance workloads were not changed by this review.
 The subsequent candidate implementation and its CQRS boundary are documented in
 [P2 read-path implementation](P2-read-path-implementation.md). The measurements
 below describe the earlier build-17 diagnosis; they are not results for that
-candidate. See [current evidence index](README.md) for later test outcomes.
+candidate. See [current evidence index](../status/README.md) for later test outcomes.
 
 ## Evidence that changes the design decision
 
@@ -81,7 +81,7 @@ the WSL/WireGuard timing is invalid (negative native durations and independently
 observed backwards guest realtime). Native Windows fallbacks reached SSH path
 limits, including native OpenSSH descriptor exhaustion. This is **not completed
 generator isolation proof** and does not justify treating the original ratio as
-passed or attributing the SUT limit to an ISP plan. See [current status](README.md).
+passed or attributing the SUT limit to an ISP plan. See [current status](../status/README.md).
 The next prerequisite is a trustworthy clock with a high-concurrency private
 path; neither lower VUs nor relaxed timeouts are substitutes.
 
@@ -204,16 +204,11 @@ to obtain a passing-looking result. Provider/hypervisor control is a separate
 prerequisite. This transport/capacity design does not close P2.5, P1 disk loss,
 singleton coordinator/Kafka HA, P5 critical latency or encrypted exam evidence.
 
-## Reproducing the read-only analysis
+## Historical analysis and future tooling
 
-From WSL/Linux, while the historical Prometheus samples remain retained:
+The former infrastructure routing-analysis runner was removed during cleanup.
+Its historical conclusions above remain bounded observations, not fresh proof.
+Future standalone analysis and test runners belong in [`test/`](../../test/README.md).
 
-```bash
-python3 infra/vps/analyze-p2-routing.py .e2e/p2-throughput-20261119T123818Z
-```
-
-The tool only reads Kubernetes Service configuration and historical Prometheus
-queries, then writes local ignored evidence. It launches no k6, changes no
-Deployment, pauses no process, and accesses no database/Secret. Empty/expired
-metric history is missing evidence, not a balanced-routing pass. Current
-Prometheus retention is bounded; preserve raw exports before expiry.
+Historical Prometheus queries and raw exports can expire or be incomplete.
+Missing history is not evidence of balanced routing or a passing throughput ratio.

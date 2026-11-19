@@ -15,7 +15,8 @@ import re
 import yaml
 
 from provision import Hosts,ROOT,inventory
-from deploy import import_worker,NS
+from deploy import import_worker
+from vps_config import NAMESPACE as NS
 
 
 def main():

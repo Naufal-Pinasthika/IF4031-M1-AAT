@@ -5,6 +5,7 @@ import shlex
 import subprocess
 import resource
 from provision import Hosts, ROOT, inventory
+from vps_config import TUNNEL_PORTS
 
 
 def main():
@@ -25,10 +26,11 @@ def main():
         subprocess.run(args,check=True)
     elif a.action == 'tunnel':
         args = h.command(server, '', multiplex=False)[:-2]
-        for port in (30080, 30083, 30084, 30086, 30090):
+        for port in TUNNEL_PORTS:
             args += ['-L', f'127.0.0.1:{port}:{server["private_ip"]}:{port}']
         args += ['-L', '127.0.0.1:16443:127.0.0.1:6443', '-o', 'ExitOnForwardFailure=yes', '-N', server['user'] + '@' + server['host']]
-        print('Endpoints available on localhost:30080/30083/30084/30086/30090 while this process runs.', flush=True)
+        ports = '/'.join(map(str, TUNNEL_PORTS))
+        print('Endpoints available on localhost:'+ports+' while this process runs.', flush=True)
         def limits():
             _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
             resource.setrlimit(resource.RLIMIT_NOFILE, (min(65536, hard), hard))

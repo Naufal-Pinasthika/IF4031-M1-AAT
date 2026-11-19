@@ -13,9 +13,9 @@ import re
 import shlex
 import subprocess
 from provision import Hosts, ROOT, inventory
+from vps_config import NAMESPACE as NS
 from deploy import import_worker
 
-NS = 'sistem-informasi-kebencanaan-bnpb'
 
 
 def main():

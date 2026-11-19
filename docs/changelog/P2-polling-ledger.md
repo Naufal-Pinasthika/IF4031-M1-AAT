@@ -160,4 +160,4 @@ canonical tasks (one in explicit single-store development mode).
 The v2→v3 transition requires stopping old Aggregator workers before starting
 new ones: v2 workers may acknowledge after only one replica write. This one-off
 cutover is NOT a P2.8 rolling-update pass. Do not run schema-v2 rollback images
-against v3. See [the correction and evidence summary](README.md).
+against v3. See [the correction and evidence summary](../status/README.md).
