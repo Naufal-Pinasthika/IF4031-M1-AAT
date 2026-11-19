@@ -158,7 +158,7 @@ metadata:
   name: aggregator
 spec:
   selector:
-    app: aggregator
+    app: aggregator-gateway
   ports:
   - name: http
     port: 8083
@@ -230,7 +230,9 @@ spec:
             cpu: 250m
             memory: 256Mi
           limits:
-            cpu: 750m
+            # Tested 10k-VU budget; 750m starved read/control work under load.
+            # CPU is optional in M2's table; keep the prescribed memory limit.
+            cpu: "2"
             memory: 512Mi
         startupProbe:
           httpGet:

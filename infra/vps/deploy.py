@@ -38,7 +38,7 @@ def services():
                                   ('notifier-consumer', 8086, 30086)]:
         result.append({'apiVersion': 'v1', 'kind': 'Service',
                        'metadata': {'name': name + '-vps', 'namespace': NS},
-                       'spec': {'type': 'NodePort', 'selector': {'app': name},
+                       'spec': {'type': 'NodePort', 'selector': {'app': 'aggregator-gateway' if name=='aggregator' else name},
                                 'ports': [{'port': port, 'targetPort': port, 'nodePort': nodeport}]}})
     return {'apiVersion': 'v1', 'kind': 'List', 'items': result}
 

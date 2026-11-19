@@ -56,14 +56,30 @@ func main() {
 	tracker := status.NewTracker()
 	tracker.EnableSharedHealth(3*time.Second + cfg.CoordinationTimeout)
 	service := aggregator.NewAggregator(poller, eventStore, coordinator, publisher, cfg, logger, tracker)
-	readSide := handler.NewCachedReader(eventStore, cfg.ReadCacheTTL, 2*cfg.StoreTimeout+100*time.Millisecond)
+	fillReader := handler.NewLimitedReader(eventStore, cfg.MaxInFlight, cfg.FieldReservedSlots)
+	readSide := handler.NewCachedReader(fillReader, cfg.ReadCacheTTL, 2*cfg.StoreTimeout+100*time.Millisecond, logger)
+	var projection *store.ReadProjection
+	var projectionErr error
+	if cfg.SharedReadProjection {
+		projection, projectionErr = store.NewReadProjection(startupCtx, cfg.CoordinationURL)
+	}
+	if projectionErr != nil {
+		logger.Warn("read_projection_unavailable", "error", projectionErr)
+	} else if projection != nil {
+		defer projection.Close()
+		readSide.SetProjection(projection)
+	}
 	apiHandler := handler.New(readSide, tracker)
 	// p1
 	p1Handler := handler.NewP1(eventStore, coordinator, cfg.AuditToken)
-	limiter := handler.NewPriorityLimiter(cfg.MaxInFlight, cfg.FieldReservedSlots)
+	limiter := handler.NewPriorityLimiter(cfg.ResponseSlots, cfg.ResponseSlots/4)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if err := startProfiling(ctx, logger); err != nil {
+		logger.Error("profiling_initialization_failed", "error", err)
+		os.Exit(1)
+	}
 	// p1: recovery continues even when live polling is disabled.
 	var workers sync.WaitGroup
 	workers.Go(func() { tracker.RunSharedHealth(ctx, coordinator, time.Second) })
@@ -91,6 +107,10 @@ func main() {
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		metric.Default.WritePrometheus(w)
+		handler.WriteReadMetrics(w)
+		if projection != nil {
+			projection.WriteMetrics(w)
+		}
 	})
 	mux.HandleFunc("GET /internal/events", handler.AggregatorAuth(limiter.Wrap(apiHandler.GetEvents)))
 	mux.HandleFunc("GET /internal/events/{id}", handler.AggregatorAuth(limiter.Wrap(apiHandler.GetEventByID)))

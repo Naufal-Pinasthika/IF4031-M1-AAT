@@ -3,51 +3,69 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// p1 one recovery loop + never holds writer lock over the dataset scan
+// Health observations must not wait for an elected dataset repair to finish.
+// Both loops join before storage pools are closed on shutdown.
 func (s *Store) RunRecovery(ctx context.Context, coordinator *Coordinator, holder string, ttl time.Duration) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.refreshUnitStates(ctx)
-			lease, leader, err := coordinator.AcquireOrRenewLease(ctx, "P1_RECOVERY", holder, ttl)
-			if err == nil && leader {
-				// Repair can take longer than one lease. Renew while working and
-				// stop this cycle if the exact epoch is no longer owned.
-				cycle, cancel := context.WithCancel(ctx)
-				done := make(chan struct{})
-				go func() {
-					defer close(done)
-					renewal := time.NewTicker(ttl / 3)
-					defer renewal.Stop()
-					for {
-						select {
-						case <-cycle.Done():
+	runMaintenanceLoops(ctx, 5*time.Second, s.refreshUnitStates, func(ctx context.Context) {
+		ctx = maintenanceContext(ctx)
+		lease, leader, err := coordinator.AcquireOrRenewLease(ctx, "P1_RECOVERY", holder, ttl)
+		if err == nil && leader {
+			// Repair can take longer than one lease. Renew while working and
+			// stop this cycle if the exact epoch is no longer owned.
+			cycle, cancel := context.WithCancel(ctx)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				renewal := time.NewTicker(ttl / 3)
+				defer renewal.Stop()
+				for {
+					select {
+					case <-cycle.Done():
+						return
+					case <-renewal.C:
+						if coordinator.RenewLease(cycle, "P1_RECOVERY", holder, lease.Token, ttl) != nil {
+							cancel()
 							return
-						case <-renewal.C:
-							if coordinator.RenewLease(cycle, "P1_RECOVERY", holder, lease.Token, ttl) != nil {
-								cancel()
-								return
-							}
 						}
 					}
-				}()
-				s.recoverCycle(cycle)
-				// ready describes reachability/bootstrap, not proof that every
-				// historical write reached this replica. Incremental anti-entropy
-				// continuously closes old gaps without withdrawing healthy stores.
-				s.reconcileReady(cycle)
-				cancel()
-				<-done
+				}
+			}()
+			s.recoverCycle(cycle)
+			// ready describes reachability/bootstrap, not proof that every
+			// historical write reached this replica. Incremental anti-entropy
+			// continuously closes old gaps without withdrawing healthy stores.
+			s.reconcileReady(cycle)
+			cancel()
+			<-done
+		}
+	})
+}
+
+func runMaintenanceLoops(ctx context.Context, interval time.Duration, probe, repair func(context.Context)) {
+	var workers sync.WaitGroup
+	run := func(work func(context.Context)) {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if ctx.Err() == nil {
+					work(ctx)
+				}
 			}
 		}
 	}
+	workers.Go(func() { run(probe) })
+	run(repair)
+	workers.Wait()
 }
 
 // Reachability/ready flags are local to each Aggregator. Standby instances must
@@ -62,17 +80,32 @@ func (s *Store) refreshUnitStates(ctx context.Context) {
 		err := u.probe.QueryRow(op, `SELECT status FROM p1_metadata WHERE singleton=true`).Scan(&status)
 		cancel()
 		if err != nil {
-			s.noteProbeFailure(ctx, u, err)
+			s.noteProbeFailure(ctx, u, err, generation)
 			continue
 		}
-		s.state.Lock()
-		if u.generation == generation {
-			u.probeTimeouts = 0
-			u.online = true
-			u.ready = status == "ready"
-		}
-		s.state.Unlock()
+		s.noteProbeSuccess(u, generation, status)
 	}
+}
+
+func (s *Store) noteProbeSuccess(u *unit, generation uint64, status string) {
+	s.state.Lock()
+	defer s.state.Unlock()
+	if u.generation != generation {
+		return // stale observation cannot undo a newer failure/repair epoch
+	}
+	if !u.online {
+		// A working probe connection does not revive idle sockets interrupted
+		// in the other pools. Reset before publishing online; checked-out
+		// connections close on return rather than aborting in-flight work.
+		for _, pool := range []*pgxpool.Pool{u.pool, u.priority, u.maintenance} {
+			if pool != nil {
+				pool.Reset()
+			}
+		}
+	}
+	u.probeTimeouts = 0
+	u.online = true
+	u.ready = status == "ready" && !u.repairing
 }
 
 // ready units are also probed (so failed replicas appear in conservative metadata)
@@ -85,6 +118,7 @@ func (s *Store) recoverCycle(ctx context.Context) {
 		}
 		s.state.RLock()
 		ready, online := u.ready, u.online
+		generation := u.generation
 		s.state.RUnlock()
 		// refreshUnitStates already checked metadata through the independent
 		// probe. Do not issue a second health observation in the same cycle.
@@ -98,9 +132,20 @@ func (s *Store) recoverCycle(ctx context.Context) {
 		// ensureSchema has a non-DDL fast path for already current schemas.
 		op, cancel := context.WithTimeout(ctx, s.timeout)
 		err := s.ensureSchema(op, u)
+		var persistentStatus string
+		if err == nil {
+			err = u.operationPool(ctx).QueryRow(op, "SELECT status FROM p1_metadata WHERE singleton=true").Scan(&persistentStatus)
+		}
 		cancel()
 		if err != nil {
 			s.logger.Warn("storage_schema_repair_failed", "storage_unit", u.name, "error", err)
+			continue
+		}
+		if persistentStatus == "ready" {
+			// Local connectivity loss is NOT durable data loss. Probe and repair
+			// now run independently: never turn a transient local down flag into
+			// a shared 'recovering' state/full copy of an already ready volume.
+			s.noteProbeSuccess(u, generation, persistentStatus)
 			continue
 		}
 		s.state.Lock()
@@ -115,13 +160,20 @@ func (s *Store) recoverUnit(ctx context.Context, index int, trusted bool) {
 	u := s.units[index]
 	s.writer.Lock()
 	s.state.Lock()
+	u.repairing = true
+	u.generation++
 	u.ready = false
 	generation := u.generation
 	u.checkpoint = ""
 	u.copied = 0
 	s.state.Unlock()
+	defer func() {
+		s.state.Lock()
+		u.repairing = false
+		s.state.Unlock()
+	}()
 	op, cancel := context.WithTimeout(ctx, s.timeout)
-	_, err := u.pool.Exec(op, "UPDATE p1_metadata SET status='recovering',checkpoint='',copied=0 WHERE singleton=true")
+	_, err := u.operationPool(ctx).Exec(op, "UPDATE p1_metadata SET status='recovering',checkpoint='',copied=0 WHERE singleton=true")
 	cancel()
 	s.writer.Unlock()
 	if err != nil {
@@ -182,7 +234,7 @@ func (s *Store) recoverUnit(ctx context.Context, index int, trusted bool) {
 			copied := u.copied
 			s.state.Unlock()
 			op, cancel := context.WithTimeout(ctx, s.timeout)
-			_, err = u.pool.Exec(op, "UPDATE p1_metadata SET checkpoint=$1,copied=$2 WHERE singleton=true", cursor, copied)
+			_, err = u.operationPool(ctx).Exec(op, "UPDATE p1_metadata SET checkpoint=$1,copied=$2 WHERE singleton=true", cursor, copied)
 			cancel()
 			if err != nil {
 				s.noteIOFailure(u, err)
@@ -206,13 +258,14 @@ func (s *Store) recoverUnit(ctx context.Context, index int, trusted bool) {
 		return
 	}
 	op, cancel = context.WithTimeout(ctx, s.timeout)
-	_, err = u.pool.Exec(op, "UPDATE p1_metadata SET status='ready',checkpoint='' WHERE singleton=true")
+	_, err = u.operationPool(ctx).Exec(op, "UPDATE p1_metadata SET status='ready',checkpoint='' WHERE singleton=true")
 	cancel()
 	if err != nil {
 		s.noteIOFailure(u, err)
 		return
 	}
 	s.state.Lock()
+	u.generation++ // invalidate probes that observed pre-activation metadata
 	u.ready = true
 	u.checkpoint = ""
 	s.state.Unlock()
@@ -222,7 +275,7 @@ func (s *Store) recoverUnit(ctx context.Context, index int, trusted bool) {
 func (s *Store) copyBatch(ctx context.Context, u *unit, partition int, cursor string) ([]record, error) {
 	op, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	rows, err := u.pool.Query(op, "SELECT "+eventColumns+",revision,fencing_token,ingestion_version FROM hazard_events WHERE partition_id=$1 AND hazard_id>$2 ORDER BY hazard_id LIMIT 100", partition, cursor)
+	rows, err := u.operationPool(ctx).Query(op, "SELECT "+eventColumns+",revision,fencing_token,ingestion_version FROM hazard_events WHERE partition_id=$1 AND hazard_id>$2 ORDER BY hazard_id LIMIT 100", partition, cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +321,7 @@ func (s *Store) reconcileReady(ctx context.Context) {
 			}
 			key := [2]int{partition, direction}
 			op, cancel := context.WithTimeout(ctx, s.timeout)
-			page, err := queryRecords(op, from, partition, "SELECT "+recordColumns+" FROM hazard_events WHERE partition_id=$1 AND hazard_id>$2 ORDER BY hazard_id LIMIT 1000", partition, s.antiEntropy[key])
+			page, err := s.queryRecords(op, from, partition, "repair_scan", "SELECT "+recordColumns+" FROM hazard_events WHERE partition_id=$1 AND hazard_id>$2 ORDER BY hazard_id LIMIT 1000", partition, s.antiEntropy[key])
 			cancel()
 			if err != nil {
 				continue
@@ -278,7 +331,7 @@ func (s *Store) reconcileReady(ctx context.Context) {
 				ids = append(ids, r.event.HazardID)
 			}
 			op, cancel = context.WithTimeout(ctx, s.timeout)
-			peers, err := queryRecords(op, to, partition, "SELECT "+recordColumns+" FROM hazard_events WHERE partition_id=$1 AND hazard_id=ANY($2::text[])", partition, ids)
+			peers, err := s.queryRecords(op, to, partition, "repair_lookup", "SELECT "+recordColumns+" FROM hazard_events WHERE partition_id=$1 AND hazard_id=ANY($2::text[])", partition, ids)
 			cancel()
 			if err != nil {
 				continue

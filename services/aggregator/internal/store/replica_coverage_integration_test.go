@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -97,6 +98,9 @@ func TestPostgresReplicaCoverageMatchesIndependentLatestDataset(t *testing.T) {
 
 func TestPostgresCoverageNeverCertifiesUnavailableReplica(t *testing.T) {
 	s, databases, _ := integrationReplicas(t)
+	// Retain diagnostics on fixture failures without changing its 100ms budget,
+	// locking scenario or assertions.
+	s.logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	e := testHazard()
 	e.IngestedAt = time.Now().UTC()
 	if err := s.UpsertAccepted(t.Context(), &e, 10); err != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -101,4 +102,5 @@ func (r *Registry) write(w http.ResponseWriter) {
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 	fmt.Fprintf(w, "aat_go_heap_bytes %d\naat_go_goroutines %d\n", mem.HeapAlloc, runtime.NumGoroutine())
+	fmt.Fprintf(w, "aat_go_runtime_memory_bytes %d\naat_go_memory_limit_bytes %d\n", mem.Sys-mem.HeapReleased, debug.SetMemoryLimit(-1))
 }

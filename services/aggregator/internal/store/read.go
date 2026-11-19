@@ -138,7 +138,13 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) (EventPage, error
 		str := base64.RawURLEncoding.EncodeToString(b)
 		next = &str
 	}
-	return EventPage{Events: events, NextCursor: next, ReadStatus: mergeStatus(status, s.readStatus())}, nil
+	health := s.readStatus()
+	if health.Partial {
+		for _, name := range health.UnavailableUnits {
+			s.logReadPartial(ctx, "metadata_degraded", "final_health", name, -1, f.Limit, nil)
+		}
+	}
+	return EventPage{Events: events, NextCursor: next, ReadStatus: mergeStatus(status, health)}, nil
 }
 
 // Query both assigned replicas, reconcile versions, then paginate the union.

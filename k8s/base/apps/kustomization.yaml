@@ -3,3 +3,4 @@ kind: Kustomization
 namespace: sistem-informasi-kebencanaan-bnpb
 resources:
 - workloads.yaml
+- gateway.yaml

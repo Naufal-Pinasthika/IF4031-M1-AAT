@@ -56,6 +56,21 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(len({r['spec']['ports'][0]['nodePort'] for r in resources}), 5)
         self.assertTrue(all(r['metadata']['namespace'] == 'sistem-informasi-kebencanaan-bnpb' for r in resources))
 
+    def test_single_common_entry_and_bounded_gateway(self):
+        docs=list(yaml.safe_load_all((ROOT/'k8s/base/apps/gateway.yaml').read_text()))
+        headless=next(d for d in docs if d['kind']=='Service')
+        self.assertEqual(headless['spec']['clusterIP'],'None')
+        self.assertEqual(headless['spec']['selector'],{'app':'aggregator'})
+        gateway=next(d for d in docs if d['kind']=='Deployment')
+        pod=gateway['spec']['template']
+        self.assertEqual(pod['metadata']['labels']['role'],'other')
+        self.assertFalse(pod['spec']['automountServiceAccountToken'])
+        limits=pod['spec']['containers'][0]['resources']
+        self.assertEqual(limits['requests']['memory'],'128Mi')
+        self.assertEqual(limits['limits']['memory'],'256Mi')
+        nodeport=next(s for s in services()['items'] if s['metadata']['name']=='aggregator-vps')
+        self.assertEqual(nodeport['spec']['selector'],{'app':'aggregator-gateway'})
+
 
 if __name__ == '__main__':
     unittest.main()

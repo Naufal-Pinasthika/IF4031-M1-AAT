@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
+	"time"
 
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/correlation"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
 )
 
@@ -14,17 +17,48 @@ func newerRecord(a, b record) bool {
 	return a.ingestionVersion > b.ingestionVersion || a.ingestionVersion == b.ingestionVersion && a.revision > b.revision
 }
 
-func queryRecords(ctx context.Context, u *unit, partition int, query string, args ...any) ([]record, error) {
-	pool := u.pool
-	if ReadPriority(ctx) && u.priority != nil {
-		pool = u.priority
+func (s *Store) queryRecords(ctx context.Context, u *unit, partition int, phase, query string, args ...any) (records []record, err error) {
+	pool := u.operationPool(ctx)
+	started := time.Now()
+	acquireTime := time.Duration(0)
+	queryStarted := time.Time{}
+	defer func() {
+		elapsed := time.Since(started)
+		if s.logger == nil || err == nil && elapsed < 100*time.Millisecond {
+			return
+		}
+		queryTime := time.Duration(0)
+		if !queryStarted.IsZero() {
+			queryTime = time.Since(queryStarted)
+		}
+		stats := pool.Stat()
+		s.logger.Warn("canonical_read_query", "correlation_id", correlation.ID(ctx),
+			"storage_unit", u.name, "partition", partition, "phase", phase,
+			"acquire_ms", float64(acquireTime)/float64(time.Millisecond),
+			"query_and_scan_ms", float64(queryTime)/float64(time.Millisecond),
+			"latency_ms", float64(elapsed)/float64(time.Millisecond),
+			"pool_acquired", stats.AcquiredConns(), "pool_idle", stats.IdleConns(),
+			"pool_max", stats.MaxConns(), "rows", len(records), "error", err)
+	}()
+	release, err := u.admitRead(ctx)
+	if err != nil {
+		return nil, err
 	}
-	rows, err := pool.Query(ctx, query, args...)
+	defer release()
+	// Acquire includes cold connection establishment. Preserve the same deadline.
+	conn, err := pool.Acquire(ctx)
+	acquireTime = time.Since(started)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Release()
+	queryStarted = time.Now()
+	rows, err := conn.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	records := make([]record, 0)
+	records = make([]record, 0)
 	for rows.Next() {
 		r := record{partition: partition}
 		e := &r.event
@@ -40,6 +74,24 @@ func queryRecords(ctx context.Context, u *unit, partition int, query string, arg
 		records = append(records, r)
 	}
 	return records, rows.Err()
+}
+
+func (s *Store) logReadPartial(ctx context.Context, reason, phase, name string, partition, limit int, err error) {
+	if s.logger != nil {
+		s.logger.Warn("canonical_read_partial", "correlation_id", correlation.ID(ctx),
+			"reason", reason, "phase", phase, "storage_unit", name,
+			"partition", partition, "fetch_limit", limit, "error", err)
+	}
+}
+
+func readFailureReason(err error) string {
+	if errors.Is(err, ErrStorageBusy) {
+		return "query_budget_exhausted"
+	}
+	if budgetError(err) {
+		return "query_timeout"
+	}
+	return "unit_unavailable"
 }
 
 func matchesRecord(e model.HazardEvent, f EventFilter, c *pageCursor) bool {
@@ -97,7 +149,7 @@ func (s *Store) readReplicaPage(ctx context.Context, partition int, f EventFilte
 			}
 			op, cancel := context.WithTimeout(ctx, s.timeout)
 			defer cancel()
-			rows, err := queryRecords(op, u, partition, query, args...)
+			rows, err := s.queryRecords(op, u, partition, "prefix", query, args...)
 			responses <- response{u, rows, err}
 		}()
 	}
@@ -108,6 +160,8 @@ func (s *Store) readReplicaPage(ctx context.Context, partition int, f EventFilte
 	for range dest {
 		result := <-responses
 		if result.err != nil || result.rows == nil {
+			reason := readFailureReason(result.err)
+			s.logReadPartial(ctx, reason, "prefix", result.unit.name, partition, limit, result.err)
 			status = mergeStatus(status, ReadStatus{Partial: true, UnavailableUnits: []string{result.unit.name}})
 			if result.err != nil {
 				if budgetError(result.err) {
@@ -151,9 +205,11 @@ func (s *Store) readReplicaPage(ctx context.Context, partition int, f EventFilte
 		}
 		if len(missing) > 0 {
 			op, cancel := context.WithTimeout(ctx, s.timeout)
-			rows, err := queryRecords(op, result.unit, partition, "SELECT "+recordColumns+" FROM hazard_events WHERE partition_id=$1 AND hazard_id=ANY($2::text[])", partition, missing)
+			rows, err := s.queryRecords(op, result.unit, partition, "candidate_lookup", "SELECT "+recordColumns+" FROM hazard_events WHERE partition_id=$1 AND hazard_id=ANY($2::text[])", partition, missing)
 			cancel()
 			if err != nil {
+				reason := readFailureReason(err)
+				s.logReadPartial(ctx, reason, "candidate_lookup", result.unit.name, partition, limit, err)
 				if !availabilityError(err) {
 					return nil, status, err
 				}
@@ -211,6 +267,7 @@ func (s *Store) readReplicaPage(ctx context.Context, partition int, f EventFilte
 			continue
 		} // exhausted matching rows
 		if len(events) < limit || eventBefore(result.rows[len(result.rows)-1].event, events[limit-1], f.Audit) {
+			s.logReadPartial(ctx, "coverage_unproven", "coverage", result.unit.name, partition, limit, nil)
 			status.Partial = true
 			status.coverageIncomplete = true
 		}

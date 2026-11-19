@@ -13,35 +13,37 @@ type StorageUnit struct{ Name, DatabaseURL string }
 
 // p1
 type Config struct {
-	StorageUnits        []StorageUnit
-	StoreTimeout        time.Duration
-	CoordinationURL     string
-	CoordinationTimeout time.Duration
-	AuditToken          string
-	ImportOnly          bool
-	InstanceID          string
-	LeaseTTL            time.Duration
-	ListenAddress       string
-	DatabaseURL         string
-	KafkaBrokers        []string
-	KafkaTopic          string
-	BMKGURL             string
-	BMKGAPIKey          string
-	PVMBGURL            string
-	PVMBGToken          string
-	CoastalURL          string
-	CoastalToken        string
-	PollingInterval     time.Duration
-	CoastalInterval     time.Duration
-	HTTPTimeout         time.Duration
-	CoastalTimeout      time.Duration
-	CoastalMaxStaleness time.Duration
-	CircuitFailures     int
-	CircuitOpenDuration time.Duration
-	MaxInFlight         int
-	FieldReservedSlots  int
-	ReadCacheTTL        time.Duration
-	StartSince          time.Time
+	StorageUnits         []StorageUnit
+	StoreTimeout         time.Duration
+	CoordinationURL      string
+	CoordinationTimeout  time.Duration
+	AuditToken           string
+	ImportOnly           bool
+	InstanceID           string
+	LeaseTTL             time.Duration
+	ListenAddress        string
+	DatabaseURL          string
+	KafkaBrokers         []string
+	KafkaTopic           string
+	BMKGURL              string
+	BMKGAPIKey           string
+	PVMBGURL             string
+	PVMBGToken           string
+	CoastalURL           string
+	CoastalToken         string
+	PollingInterval      time.Duration
+	CoastalInterval      time.Duration
+	HTTPTimeout          time.Duration
+	CoastalTimeout       time.Duration
+	CoastalMaxStaleness  time.Duration
+	CircuitFailures      int
+	CircuitOpenDuration  time.Duration
+	MaxInFlight          int
+	ResponseSlots        int
+	SharedReadProjection bool
+	FieldReservedSlots   int
+	ReadCacheTTL         time.Duration
+	StartSince           time.Time
 }
 
 // p1
@@ -57,6 +59,14 @@ func Load() (Config, error) {
 	maxInFlight, err := positiveIntFromEnv("AGGREGATOR_MAX_IN_FLIGHT", 64)
 	if err != nil {
 		return Config{}, err
+	}
+	responseSlots, err := positiveIntFromEnv("AGGREGATOR_RESPONSE_SLOTS", 128)
+	if err != nil || responseSlots > 256 {
+		return Config{}, fmt.Errorf("AGGREGATOR_RESPONSE_SLOTS must be between 1 and 256")
+	}
+	sharedProjection, err := strconv.ParseBool(envOrDefault("AGGREGATOR_SHARED_READ_PROJECTION", "true"))
+	if err != nil {
+		return Config{}, fmt.Errorf("AGGREGATOR_SHARED_READ_PROJECTION must be boolean")
 	}
 	fieldReserve, err := strconv.Atoi(envOrDefault("AGGREGATOR_FIELD_RESERVED_SLOTS", strconv.Itoa(maxInFlight/4)))
 	if err != nil || fieldReserve < 0 || fieldReserve >= maxInFlight {
@@ -149,35 +159,37 @@ func Load() (Config, error) {
 	}
 
 	return Config{
-		StorageUnits:        units,
-		StoreTimeout:        timeout,
-		CoordinationURL:     coordinationURL,
-		CoordinationTimeout: coordinationTimeout,
-		AuditToken:          os.Getenv("P1_AUDIT_TOKEN"),
-		ImportOnly:          importOnly,
-		InstanceID:          instanceID,
-		LeaseTTL:            leaseTTL,
-		ListenAddress:       envOrDefault("AGGREGATOR_LISTEN_ADDRESS", ":8083"),
-		DatabaseURL:         databaseURL,
-		KafkaBrokers:        splitCommaSeparated(os.Getenv("KAFKA_BROKERS"), "localhost:9092"),
-		KafkaTopic:          envOrDefault("KAFKA_TOPIC", "hazard.events.v1"),
-		BMKGURL:             envOrDefault("BMKG_URL", "http://localhost:8081"),
-		BMKGAPIKey:          os.Getenv("BMKG_API_KEY"),
-		PVMBGURL:            envOrDefault("PVMBG_URL", "http://localhost:8082"),
-		PVMBGToken:          os.Getenv("PVMBG_TOKEN"),
-		CoastalURL:          envOrDefault("COASTAL_URL", "http://sensor-pantai:8080"),
-		CoastalToken:        os.Getenv("PANTAI_AUTH_TOKEN"),
-		PollingInterval:     pollingInterval,
-		CoastalInterval:     coastalInterval,
-		HTTPTimeout:         httpTimeout,
-		CoastalTimeout:      coastalTimeout,
-		CoastalMaxStaleness: coastalMaxStaleness,
-		CircuitFailures:     circuitFailures,
-		CircuitOpenDuration: circuitOpenDuration,
-		MaxInFlight:         maxInFlight,
-		FieldReservedSlots:  fieldReserve,
-		ReadCacheTTL:        time.Duration(readCacheMS) * time.Millisecond,
-		StartSince:          startSince,
+		StorageUnits:         units,
+		StoreTimeout:         timeout,
+		CoordinationURL:      coordinationURL,
+		CoordinationTimeout:  coordinationTimeout,
+		AuditToken:           os.Getenv("P1_AUDIT_TOKEN"),
+		ImportOnly:           importOnly,
+		InstanceID:           instanceID,
+		LeaseTTL:             leaseTTL,
+		ListenAddress:        envOrDefault("AGGREGATOR_LISTEN_ADDRESS", ":8083"),
+		DatabaseURL:          databaseURL,
+		KafkaBrokers:         splitCommaSeparated(os.Getenv("KAFKA_BROKERS"), "localhost:9092"),
+		KafkaTopic:           envOrDefault("KAFKA_TOPIC", "hazard.events.v1"),
+		BMKGURL:              envOrDefault("BMKG_URL", "http://localhost:8081"),
+		BMKGAPIKey:           os.Getenv("BMKG_API_KEY"),
+		PVMBGURL:             envOrDefault("PVMBG_URL", "http://localhost:8082"),
+		PVMBGToken:           os.Getenv("PVMBG_TOKEN"),
+		CoastalURL:           envOrDefault("COASTAL_URL", "http://sensor-pantai:8080"),
+		CoastalToken:         os.Getenv("PANTAI_AUTH_TOKEN"),
+		PollingInterval:      pollingInterval,
+		CoastalInterval:      coastalInterval,
+		HTTPTimeout:          httpTimeout,
+		CoastalTimeout:       coastalTimeout,
+		CoastalMaxStaleness:  coastalMaxStaleness,
+		CircuitFailures:      circuitFailures,
+		CircuitOpenDuration:  circuitOpenDuration,
+		MaxInFlight:          maxInFlight,
+		ResponseSlots:        responseSlots,
+		SharedReadProjection: sharedProjection,
+		FieldReservedSlots:   fieldReserve,
+		ReadCacheTTL:         time.Duration(readCacheMS) * time.Millisecond,
+		StartSince:           startSince,
 	}, nil
 }
 
