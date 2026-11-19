@@ -74,6 +74,11 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 
 	page, err := h.reader.ListEvents(r.Context(), filter)
 	if err != nil {
+		if errors.Is(err, store.ErrStorageBusy) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, "storage busy")
+			return
+		}
 		if errors.Is(err, store.ErrInvalidCursor) {
 			writeError(w, http.StatusBadRequest, "invalid cursor")
 			return
@@ -84,6 +89,7 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"events":  page.Events,
 		"partial": page.Partial, "unavailable_units": page.UnavailableUnits, "next_cursor": page.NextCursor,
+		"replication_degraded": page.ReplicationDegraded, "lagging_units": page.LaggingUnits,
 		"sources": h.sourceStatuses(filter.Source),
 	})
 }
@@ -92,6 +98,11 @@ func (h *Handler) GetEvents(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) GetEventByID(w http.ResponseWriter, r *http.Request) {
 	lookup, err := h.reader.GetEventByID(r.Context(), r.PathValue("id"))
 	if err != nil {
+		if errors.Is(err, store.ErrStorageBusy) {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, "storage busy")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to load hazard event")
 		return
 	}
@@ -103,7 +114,7 @@ func (h *Handler) GetEventByID(w http.ResponseWriter, r *http.Request) {
 	if lookup.Event != nil {
 		sourceStatus = h.tracker.Snapshot(string(lookup.Event.Source))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"event": lookup.Event, "source_status": sourceStatus, "partial": lookup.Partial, "unavailable_units": lookup.UnavailableUnits})
+	writeJSON(w, http.StatusOK, map[string]any{"event": lookup.Event, "source_status": sourceStatus, "partial": lookup.Partial, "unavailable_units": lookup.UnavailableUnits, "replication_degraded": lookup.ReplicationDegraded, "lagging_units": lookup.LaggingUnits})
 }
 
 func (h *Handler) GetSourceStatus(w http.ResponseWriter, r *http.Request) {
@@ -117,6 +128,9 @@ func (h *Handler) sourceStatuses(source string) map[string]status.SourceStatus {
 	}
 	if source == "" || source == "PVMBG" {
 		result["PVMBG"] = h.tracker.Snapshot("PVMBG")
+	}
+	if source == "" || source == "SENSOR_PANTAI" {
+		result["SENSOR_PANTAI"] = h.tracker.Snapshot("SENSOR_PANTAI")
 	}
 	return result
 }

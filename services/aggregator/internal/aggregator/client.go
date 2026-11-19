@@ -64,7 +64,7 @@ type Client struct {
 }
 
 func NewClient(timeout time.Duration, logger *slog.Logger) *Client {
-	return &Client{httpClient: &http.Client{Timeout: timeout}, logger: logger}
+	return &Client{httpClient: sourceHTTPClient(timeout), logger: logger}
 }
 
 func (c *Client) FetchBMKG(ctx context.Context, baseURL, apiKey, correlationID string, since time.Time) ([]SeismicEvent, []TsunamiWarning, error) {

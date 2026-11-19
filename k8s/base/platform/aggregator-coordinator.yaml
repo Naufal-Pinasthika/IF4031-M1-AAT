@@ -1,0 +1,80 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: aggregator-coordinator
+spec:
+  selector:
+    app: aggregator-coordinator
+  ports:
+  - name: tcp
+    port: 5432
+    targetPort: 5432
+  clusterIP: None
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: aggregator-coordinator
+spec:
+  serviceName: aggregator-coordinator
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aggregator-coordinator
+  template:
+    metadata:
+      labels:
+        app: aggregator-coordinator
+        role: store
+    spec:
+      automountServiceAccountToken: false
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        envFrom:
+        - configMapRef:
+            name: aggregator-coordinator-config
+        - secretRef:
+            name: aggregator-coordinator-credentials
+        ports:
+        - name: tcp
+          containerPort: 5432
+        resources:
+          requests:
+            memory: 512Mi
+          limits:
+            memory: 1Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        startupProbe:
+          exec: &coordinatorProbe
+            command: ["pg_isready", "-U", "aggregator_coord", "-d", "coordination"]
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 60
+        readinessProbe:
+          exec: *coordinatorProbe
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        livenessProbe:
+          exec: *coordinatorProbe
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 6
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: [ReadWriteOnce]
+      resources:
+        requests:
+          storage: 1Gi

@@ -14,11 +14,21 @@ import (
 )
 
 type Consumer struct {
-	reader  *kafka.Reader
+	reader  messageReader
 	brokers []string
 	topic   string
-	store   *store.Store
+	store   notificationStore
 	logger  *slog.Logger
+}
+
+type messageReader interface {
+	FetchMessage(context.Context) (kafka.Message, error)
+	CommitMessages(context.Context, ...kafka.Message) error
+	Close() error
+}
+
+type notificationStore interface {
+	Deliver(string, event.Envelope) (bool, error)
 }
 
 func New(brokers []string, topic, group string, notificationStore *store.Store, logger *slog.Logger) *Consumer {
@@ -49,6 +59,9 @@ func (c *Consumer) Run(ctx context.Context) {
 				return
 			}
 			c.logger.Error("kafka_fetch_failed", "error", err, "latency_ms", time.Since(started).Milliseconds())
+			if !pause(ctx, 100*time.Millisecond) {
+				return
+			}
 			continue
 		}
 
@@ -57,7 +70,9 @@ func (c *Consumer) Run(ctx context.Context) {
 		envelope, err := event.Decode(message.Value)
 		if err != nil {
 			c.logger.Error("event_rejected", "error", err, "correlation_id", correlationID, "partition", message.Partition, "offset", message.Offset)
-			c.commit(ctx, message, correlationID)
+			if !c.commit(ctx, message, correlationID) {
+				return
+			}
 			continue
 		}
 		if envelope.CorrelationID != "" {
@@ -65,30 +80,83 @@ func (c *Consumer) Run(ctx context.Context) {
 		}
 
 		messageID := message.Topic + ":" + strconv.Itoa(message.Partition) + ":" + strconv.FormatInt(message.Offset, 10)
-		delivered, err := c.store.Deliver(messageID, envelope)
-		if err != nil {
-			c.logger.Error("notification_delivery_failed", "error", err, "correlation_id", correlationID, "message_id", messageID)
-			continue
+		var delivered bool
+		deliveryStarted := time.Now()
+		// Never fetch a later offset while this record is not durable. Kafka
+		// commits the highest offset per partition, including earlier records.
+		for delay := 100 * time.Millisecond; ; delay = min(2*time.Second, delay*2) {
+			if ctx.Err() != nil {
+				return
+			}
+			delivered, err = c.store.Deliver(messageID, envelope)
+			if err == nil {
+				break
+			}
+			c.logger.Error("notification_delivery_failed", "error", err, "correlation_id", correlationID, "message_id", messageID, "retry_in_ms", delay.Milliseconds())
+			if !pause(ctx, delay) {
+				return
+			}
 		}
-		c.logger.Info("notification_delivered", "correlation_id", correlationID, "message_id", messageID, "hazard_id", envelope.Data.HazardID, "delivered", delivered)
-		c.commit(ctx, message, correlationID)
+		var sourceLatency any
+		if envelope.Data.Source != "SENSOR_PANTAI" {
+			sourceLatency = nonNegativeMilliseconds(time.Since(envelope.Data.OccurredAt))
+		}
+		c.logger.Info("notification_delivered", "correlation_id", correlationID, "message_id", messageID, "hazard_id", envelope.Data.HazardID, "delivered", delivered, "latency_ms", time.Since(deliveryStarted).Milliseconds(),
+			"pipeline_latency_ms", nonNegativeMilliseconds(time.Since(envelope.PublishedAt)), "source_latency_ms", sourceLatency,
+			"ingress_latency_ms", nonNegativeMilliseconds(time.Since(envelope.Data.IngestedAt)))
+		if !c.commit(ctx, message, correlationID) {
+			return
+		}
 	}
 }
 
-func (c *Consumer) commit(ctx context.Context, message kafka.Message, correlationID string) {
-	started := time.Now()
-	if err := c.reader.CommitMessages(ctx, message); err != nil {
-		c.logger.Error("kafka_commit_failed", "error", err, "correlation_id", correlationID, "partition", message.Partition, "offset", message.Offset, "latency_ms", time.Since(started).Milliseconds())
-		return
+func (c *Consumer) commit(ctx context.Context, message kafka.Message, correlationID string) bool {
+	for delay := 100 * time.Millisecond; ctx.Err() == nil; delay = min(2*time.Second, delay*2) {
+		started := time.Now()
+		if err := c.reader.CommitMessages(ctx, message); err != nil {
+			c.logger.Error("kafka_commit_failed", "error", err, "correlation_id", correlationID, "partition", message.Partition, "offset", message.Offset, "latency_ms", time.Since(started).Milliseconds())
+			if !pause(ctx, delay) {
+				return false
+			}
+			continue
+		}
+		c.logger.Info("kafka_commit_completed", "correlation_id", correlationID, "partition", message.Partition, "offset", message.Offset, "latency_ms", time.Since(started).Milliseconds())
+		return true
 	}
-	c.logger.Info("kafka_commit_completed", "correlation_id", correlationID, "partition", message.Partition, "offset", message.Offset, "latency_ms", time.Since(started).Milliseconds())
+	return false
+}
+
+func pause(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 func (c *Consumer) Probe(ctx context.Context) error {
+	var last error
+	for _, broker := range c.brokers {
+		if err := c.probeBroker(ctx, broker); err == nil {
+			return nil
+		} else {
+			last = err
+		}
+	}
+	if last == nil {
+		return fmt.Errorf("no Kafka broker configured")
+	}
+	return last
+}
+
+func (c *Consumer) probeBroker(ctx context.Context, broker string) error {
 	if len(c.brokers) == 0 {
 		return fmt.Errorf("no Kafka broker configured")
 	}
-	connection, err := kafka.DialContext(ctx, "tcp", c.brokers[0])
+	connection, err := kafka.DialContext(ctx, "tcp", broker)
 	if err != nil {
 		return err
 	}
@@ -112,4 +180,11 @@ func header(message kafka.Message, name string) string {
 		}
 	}
 	return ""
+}
+
+func nonNegativeMilliseconds(duration time.Duration) int64 {
+	if duration < 0 {
+		return 0
+	}
+	return duration.Milliseconds()
 }

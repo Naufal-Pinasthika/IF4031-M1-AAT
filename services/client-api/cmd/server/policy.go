@@ -11,6 +11,7 @@ import (
 const (
 	scopeSummary = "hazards:read:summary"
 	scopeRaw     = "hazards:read:raw"
+	scopeOps     = "hazards:read:ops"
 )
 
 var (

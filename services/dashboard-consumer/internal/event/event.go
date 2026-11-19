@@ -9,11 +9,12 @@ import (
 const UpsertedType = "hazard.event.upserted"
 
 type Envelope struct {
-	EventType     string      `json:"event_type"`
-	SchemaVersion int         `json:"schema_version"`
-	CorrelationID string      `json:"correlation_id"`
-	PublishedAt   time.Time   `json:"published_at"`
-	Data          HazardEvent `json:"data"`
+	IngestionVersion int64       `json:"ingestion_version,omitempty"`
+	EventType        string      `json:"event_type"`
+	SchemaVersion    int         `json:"schema_version"`
+	CorrelationID    string      `json:"correlation_id"`
+	PublishedAt      time.Time   `json:"published_at"`
+	Data             HazardEvent `json:"data"`
 }
 
 type HazardEvent struct {
