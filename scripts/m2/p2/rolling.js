@@ -24,10 +24,13 @@ export default function () {
   });
   let complete = false;
   let partial = null;
+  let diagnostics = {};
   if (response.status === 200) {
     try {
       const body = response.json();
       partial = body.partial;
+      diagnostics = {unavailable_units: body.unavailable_units,
+        replication_degraded: body.replication_degraded, lagging_units: body.lagging_units};
       complete = partial === false && Array.isArray(body.events) && body.events.every((e) => typeof e.hazard_id === 'string');
     } catch (_) { /* not a complete JSON response */ }
   }
@@ -39,7 +42,7 @@ export default function () {
   }
   check(response, { 'complete HTTP 200 during rollout': () => complete });
   if (!complete) {
-    console.warn(JSON.stringify({status: response.status, partial,
+    console.warn(JSON.stringify({status: response.status, partial, build, ...diagnostics,
       correlation_id: `rolling-${__VU}-${__ITER}`, duration_ms: response.timings.duration,
       error: response.error || null}));
   }

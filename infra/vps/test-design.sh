@@ -2,7 +2,9 @@
 # No Kubernetes writes and no connection to application storage.
 set -euo pipefail
 directory="$1"
+repeat="${2:-1}"
 [[ "$directory" =~ ^/opt/aat/regression/p2p5-[0-9TZ]+$ ]] || exit 2
+[[ "$repeat" =~ ^[0-9]+$ ]] && ((repeat>=1 && repeat<=50)) || exit 2
 cd "$directory"
 name="aat-design-regression-${directory##*/}"
 if docker inspect "$name" >/dev/null 2>&1; then
@@ -29,6 +31,7 @@ mkdir -p /opt/aat/go-test-cache /opt/aat/go-test-mod
 docker run --rm --network host --memory=3g --cpus=4 \
   -v "$directory:/work" -w /work \
   -v /opt/aat/go-test-cache:/root/.cache/go-build -v /opt/aat/go-test-mod:/go/pkg/mod \
+  -e AAT_FOCUSED_REPEAT="$repeat" \
   -e P2_TEST_DATABASE_URL="postgres://postgres:local-regression-only@127.0.0.1:$port/regression?sslmode=disable" \
   golang:1.25-alpine sh -ec '
     apk add --no-cache build-base >/dev/null
@@ -37,5 +40,12 @@ docker run --rm --network host --memory=3g --cpus=4 \
       cd "/work/$service"
       go test -race -count=1 -timeout=180s ./...
       go vet ./...
+      if [ "$service" = aggregator ]; then
+        echo "Repeating gateway admission/drain regression $AAT_FOCUSED_REPEAT times"
+        go test -race -count="$AAT_FOCUSED_REPEAT" -timeout=180s ./internal/gateway ./cmd/gateway
+        echo "Repeating bounded health/outage/bulkhead regression $AAT_FOCUSED_REPEAT times"
+        go test -race -count="$AAT_FOCUSED_REPEAT" -timeout=180s \
+          -run "^(TestRawNetwork|TestDefinitiveIO|TestProbeCannot|TestProbeLoop|TestReadWork|TestPostgresNetworkOutage|TestPostgresMaintenanceBudget|TestPostgresRecoveryDoesNotRecopy)" ./internal/store
+      fi
     done
   '
