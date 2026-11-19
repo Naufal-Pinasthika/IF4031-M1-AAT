@@ -120,6 +120,9 @@ raise SystemExit(0 if result['passed'] else 1)
 def render(start,remote):
     stamp=start['database_time'].replace('Z','+00:00')
     if re.search(r'[+-]\d{2}$',stamp):stamp+=':00'
+    # PostgreSQL omits trailing zeroes; Python 3.10 only accepts 3/6 fractional
+    # digits. Pad, never round or shift the recorded audit-window boundary.
+    stamp=re.sub(r'(\.\d{1,6})(?=[+-]\d{2}:\d{2}$)',lambda m:m.group(1).ljust(7,'0'),stamp)
     dt.datetime.fromisoformat(stamp)
     code=COLLECT.replace('DIRECTORY',repr(remote)).replace('LOWER',str(int(start['poll_id'])))
     code=code.replace('START.replace',repr(stamp)+'.replace')
