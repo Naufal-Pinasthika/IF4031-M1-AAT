@@ -29,6 +29,7 @@ func main() {
 	// poller/aggregator init
 	client := aggregator.NewClient(cfg.HTTPTimeout, logger)
 	poller := aggregator.New(client, cfg, logger)
+	satellite := aggregator.NewSatelliteConsumer(cfg.SatelliteURL, cfg.SatelliteToken, logger)
 	startupCtx := correlation.WithID(context.Background(), "startup")
 	// p1: routing and bounded I/O across storage units.
 	eventStore, err := store.New(startupCtx, cfg.StorageUnits, cfg.StoreTimeout, logger)
@@ -45,7 +46,7 @@ func main() {
 	}
 	defer publisher.Close()
 	tracker := status.NewTracker()
-	service := aggregator.NewAggregator(poller, eventStore, publisher, cfg, logger, tracker)
+	service := aggregator.NewAggregator(poller, satellite, eventStore, publisher, cfg, logger, tracker)
 	apiHandler := handler.New(eventStore, tracker)
 	// p1
 	p1Handler := handler.NewP1(eventStore, cfg.AuditToken)

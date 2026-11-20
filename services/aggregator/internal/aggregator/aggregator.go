@@ -19,6 +19,7 @@ import (
 type EventStore interface {
 	GetEventBySourceRef(context.Context, string, string) (store.EventLookup, error) // p1
 	Upsert(ctx context.Context, event *model.HazardEvent) error
+	ProcessSatelliteEvent(ctx context.Context, eventType string, payload []byte, offset int64) ([]model.HazardEvent, error)
 }
 
 type EventPublisher interface {
@@ -27,6 +28,7 @@ type EventPublisher interface {
 
 type Aggregator struct {
 	poller    *Poller
+	satellite *SatelliteConsumer
 	store     EventStore
 	publisher EventPublisher
 	config    config.Config
@@ -53,14 +55,44 @@ var volcanoReferences = map[string]volcanoReference{
 	"DUKONO":        {Name: "Gunung Dukono", Latitude: 1.69867327144, Longitude: 127.87801665200},
 }
 
-func NewAggregator(poller *Poller, store EventStore, publisher EventPublisher, cfg config.Config, logger *slog.Logger, tracker *status.Tracker) *Aggregator {
-	return &Aggregator{poller: poller, store: store, publisher: publisher, config: cfg, logger: logger, status: tracker}
+func NewAggregator(poller *Poller, satellite *SatelliteConsumer, store EventStore, publisher EventPublisher, cfg config.Config, logger *slog.Logger, tracker *status.Tracker) *Aggregator {
+	return &Aggregator{
+		poller:    poller,
+		satellite: satellite,
+		store:     store,
+		publisher: publisher,
+		config:    cfg,
+		logger:    logger,
+		status:    tracker,
+	}
 }
 
 func (a *Aggregator) Run(ctx context.Context) {
 	go a.runBMKG(ctx)
 	go a.runPVMBG(ctx)
+	go a.runSatellite(ctx)
 	<-ctx.Done()
+}
+
+func (a *Aggregator) runSatellite(ctx context.Context) {
+	err := a.satellite.Consume(ctx, func(event SatelliteStreamEvent) error {
+		events, err := a.store.ProcessSatelliteEvent(ctx, event.Type, event.Data, event.Offset)
+		if err != nil {
+			return err
+		}
+		correlationID := fmt.Sprintf("satellite-%d", event.Offset)
+		for i := range events {
+			operationCtx := correlation.WithID(ctx, correlationID)
+			if err := a.publish(operationCtx, events[i], correlationID); err != nil {
+				return err
+			}
+		}
+		a.status.Success("SATELIT", time.Now())
+		return nil
+	})
+	if err != nil && ctx.Err() == nil {
+		a.logger.Error("satellite_feed_failed", "error", err)
+	}
 }
 
 func (a *Aggregator) runBMKG(ctx context.Context) {
