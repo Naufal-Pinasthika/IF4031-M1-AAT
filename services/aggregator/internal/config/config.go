@@ -25,6 +25,8 @@ type Config struct {
 	BMKGAPIKey      string
 	PVMBGURL        string
 	PVMBGToken      string
+	SatelliteURL    string
+	SatelliteToken  string
 	PollingInterval time.Duration
 	HTTPTimeout     time.Duration
 	MaxInFlight     int
@@ -89,6 +91,8 @@ func Load() (Config, error) {
 		BMKGAPIKey:      os.Getenv("BMKG_API_KEY"),
 		PVMBGURL:        envOrDefault("PVMBG_URL", "http://localhost:8082"),
 		PVMBGToken:      os.Getenv("PVMBG_TOKEN"),
+		SatelliteURL:    envOrDefault("SATELLITE_URL", "https://satellite.naufarrel.dev"),
+		SatelliteToken:  os.Getenv("SATELLITE_TOKEN"),
 		PollingInterval: pollingInterval,
 		HTTPTimeout:     httpTimeout,
 		MaxInFlight:     maxInFlight,
