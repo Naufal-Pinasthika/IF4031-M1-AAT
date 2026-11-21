@@ -68,6 +68,22 @@ services:
       timeout: 3s
       retries: 3
 
+  sensor-pantai:
+    image: sustuna/sensor-pantai@sha256:51fbd90d3891ad6e9f5768ad330ffb65205644cb29e50da65c7538f2e0b4397d
+    environment:
+      PANTAI_PROFILE: ${PANTAI_PROFILE:-practice}
+      PANTAI_SEED: ${PANTAI_SEED:-42}
+      PANTAI_SPEED: ${PANTAI_SPEED:-60}
+      PANTAI_AUTH_TOKEN: ${PANTAI_AUTH_TOKEN:?PANTAI_AUTH_TOKEN is required}
+    volumes:
+      - sensor-pantai-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   kafka:
     image: apache/kafka:4.0.0
     environment:
@@ -120,8 +136,10 @@ services:
     environment:
       BMKG_API_KEY: ${BMKG_API_KEY:?BMKG_API_KEY is required}
       PVMBG_TOKEN: ${PVMBG_TOKEN:?PVMBG_TOKEN is required}
+      PANTAI_AUTH_TOKEN: ${PANTAI_AUTH_TOKEN:?PANTAI_AUTH_TOKEN is required}
       AGGREGATOR_API_KEY: ${AGGREGATOR_API_KEY:?AGGREGATOR_API_KEY is required}
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      COORDINATION_DATABASE_URL: ${COORDINATION_DATABASE_URL:?COORDINATION_DATABASE_URL is required}
       KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
       KAFKA_TOPIC: ${KAFKA_TOPIC:-hazard.events.v1}
       AGGREGATOR_LISTEN_ADDRESS: ${AGGREGATOR_LISTEN_ADDRESS:-:8083}
@@ -129,16 +147,28 @@ services:
       PVMBG_URL: ${PVMBG_URL:-http://pvmbg:8082}
       SATELLITE_URL: ${SATELLITE_URL:-https://satellite.naufarrel.dev}
       SATELLITE_TOKEN: ${SATELLITE_TOKEN:?SATELLITE_TOKEN is required}
+      COASTAL_URL: ${COASTAL_URL:-http://sensor-pantai:8080}
       AGGREGATOR_POLL_INTERVAL_MS: ${AGGREGATOR_POLL_INTERVAL_MS:-5000}
       AGGREGATOR_HTTP_TIMEOUT_MS: ${AGGREGATOR_HTTP_TIMEOUT_MS:-4000}
       AGGREGATOR_MAX_IN_FLIGHT: ${AGGREGATOR_MAX_IN_FLIGHT:-64}
+      AGGREGATOR_FIELD_RESERVED_SLOTS: ${AGGREGATOR_FIELD_RESERVED_SLOTS:-16}
+      AGGREGATOR_READ_CACHE_TTL_MS: ${AGGREGATOR_READ_CACHE_TTL_MS:-100}
       AGGREGATOR_START_SINCE: ${AGGREGATOR_START_SINCE:-1970-01-01T00:00:00Z}
+      AGGREGATOR_LEASE_TTL_MS: ${AGGREGATOR_LEASE_TTL_MS:-15000}
+      COORDINATION_TIMEOUT_MS: ${COORDINATION_TIMEOUT_MS:-2000}
+      COASTAL_POLL_INTERVAL_MS: ${COASTAL_POLL_INTERVAL_MS:-500}
+      COASTAL_HTTP_TIMEOUT_MS: ${COASTAL_HTTP_TIMEOUT_MS:-1000}
+      COASTAL_MAX_STALENESS_MS: ${COASTAL_MAX_STALENESS_MS:-30000}
+      COASTAL_CIRCUIT_FAILURES: ${COASTAL_CIRCUIT_FAILURES:-3}
+      COASTAL_CIRCUIT_OPEN_MS: ${COASTAL_CIRCUIT_OPEN_MS:-5000}
     expose:
       - "8083"
     depends_on:
       bmkg:
         condition: service_healthy
       pvmbg:
+        condition: service_healthy
+      sensor-pantai:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -200,6 +230,8 @@ services:
       AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-bnpb-auth-service}
       AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-bnpb-client-api}
       CLIENT_API_MAX_IN_FLIGHT: ${CLIENT_API_MAX_IN_FLIGHT:-64}
+      CLIENT_API_FIELD_RESERVED_SLOTS: ${CLIENT_API_FIELD_RESERVED_SLOTS:-16}
+      FIELD_CLIENT_ID: ${FIELD_CLIENT_ID:-field-client}
     ports:
       - "8080:8080"
     depends_on:
@@ -276,3 +308,4 @@ volumes:
   kafka-data:
   dashboard-consumer-data:
   notifier-consumer-data:
+  sensor-pantai-data:

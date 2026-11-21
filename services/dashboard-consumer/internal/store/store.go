@@ -18,6 +18,7 @@ var (
 	eventsBucket    = []byte("events")
 	processedBucket = []byte("processed_messages")
 	metadataBucket  = []byte("metadata")
+	versionsBucket  = []byte("ingestion_versions")
 	processedKey    = []byte("processed_count")
 )
 
@@ -40,7 +41,7 @@ func Open(path string) (*Store, error) {
 	}
 	result := &Store{db: db}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range [][]byte{eventsBucket, processedBucket, metadataBucket} {
+		for _, bucket := range [][]byte{eventsBucket, processedBucket, metadataBucket, versionsBucket} {
 			if _, err := tx.CreateBucketIfNotExists(bucket); err != nil {
 				return err
 			}
@@ -68,8 +69,21 @@ func (s *Store) Apply(messageID string, envelope event.Envelope) (bool, error) {
 		if processed.Get([]byte(messageID)) != nil {
 			return nil
 		}
-		if err := tx.Bucket(eventsBucket).Put([]byte(envelope.Data.HazardID), payload); err != nil {
-			return err
+		key := []byte(envelope.Data.HazardID)
+		versions := tx.Bucket(versionsBucket)
+		previous := decodeCount(versions.Get(key))
+		if envelope.IngestionVersion < 0 {
+			return fmt.Errorf("negative ingestion version")
+		}
+		version := uint64(envelope.IngestionVersion)
+		if (version == 0 && previous == 0) || version > previous {
+			if err := tx.Bucket(eventsBucket).Put(key, payload); err != nil {
+				return err
+			}
+			if err := versions.Put(key, encodeCount(version)); err != nil {
+				return err
+			}
+			applied = true
 		}
 		if err := processed.Put([]byte(messageID), []byte(time.Now().UTC().Format(time.RFC3339Nano))); err != nil {
 			return err
@@ -79,7 +93,6 @@ func (s *Store) Apply(messageID string, envelope event.Envelope) (bool, error) {
 		if err := metadata.Put(processedKey, encodeCount(count)); err != nil {
 			return err
 		}
-		applied = true
 		return nil
 	})
 	return applied, err

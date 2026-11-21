@@ -37,6 +37,20 @@ func mergeStatus(a, b ReadStatus) ReadStatus {
 	}
 	sort.Strings(a.UnavailableUnits)
 	a.Partial = a.Partial || b.Partial
+	a.ReplicationDegraded = a.ReplicationDegraded || b.ReplicationDegraded
+	for _, name := range b.LaggingUnits {
+		found := false
+		for _, old := range a.LaggingUnits {
+			if old == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			a.LaggingUnits = append(a.LaggingUnits, name)
+		}
+	}
+	sort.Strings(a.LaggingUnits)
 	return a
 }
 
@@ -120,6 +134,9 @@ func (s *Store) AuditLocation(ctx context.Context, id string) (Locations, error)
 		}
 		cancel()
 		if err != nil {
+			if budgetError(err) {
+				return result, ErrStorageBusy
+			}
 			if !availabilityError(err) {
 				return result, err
 			}
@@ -167,6 +184,9 @@ func (s *Store) StorageStats(ctx context.Context) (StorageStats, error) {
 			err := u.pool.QueryRow(op, `SELECT (SELECT node_name FROM p1_metadata WHERE singleton=true),count(*) FILTER(WHERE partition_id=$1),count(*) FILTER(WHERE partition_id<>$1) FROM hazard_events`, i).Scan(&stats.Node, &stats.Primary, &stats.Replica)
 			cancel()
 			if err != nil {
+				if budgetError(err) {
+					return result, ErrStorageBusy
+				}
 				if !availabilityError(err) {
 					return result, err
 				}

@@ -13,24 +13,39 @@ type StorageUnit struct{ Name, DatabaseURL string }
 
 // p1
 type Config struct {
-	StorageUnits    []StorageUnit
-	StoreTimeout    time.Duration
-	AuditToken      string
-	ImportOnly      bool
-	ListenAddress   string
-	DatabaseURL     string
-	KafkaBrokers    []string
-	KafkaTopic      string
-	BMKGURL         string
-	BMKGAPIKey      string
-	PVMBGURL        string
-	PVMBGToken      string
-	SatelliteURL    string
-	SatelliteToken  string
-	PollingInterval time.Duration
-	HTTPTimeout     time.Duration
-	MaxInFlight     int
-	StartSince      time.Time
+	StorageUnits         []StorageUnit
+	StoreTimeout         time.Duration
+	AuditToken           string
+	ImportOnly           bool
+	ListenAddress        string
+	DatabaseURL          string
+	KafkaBrokers         []string
+	KafkaTopic           string
+	BMKGURL              string
+	BMKGAPIKey           string
+	PVMBGURL             string
+	PVMBGToken           string
+	SatelliteURL         string
+	SatelliteToken       string
+	CoordinationURL      string
+	CoordinationTimeout  time.Duration
+	InstanceID           string
+	LeaseTTL             time.Duration
+	CoastalURL           string
+	CoastalToken         string
+	PollingInterval      time.Duration
+	CoastalInterval      time.Duration
+	HTTPTimeout          time.Duration
+	CoastalTimeout       time.Duration
+	CoastalMaxStaleness  time.Duration
+	CircuitFailures      int
+	CircuitOpenDuration  time.Duration
+	MaxInFlight          int
+	ResponseSlots        int
+	SharedReadProjection bool
+	FieldReservedSlots   int
+	ReadCacheTTL         time.Duration
+	StartSince           time.Time
 }
 
 // p1
@@ -46,6 +61,22 @@ func Load() (Config, error) {
 	maxInFlight, err := positiveIntFromEnv("AGGREGATOR_MAX_IN_FLIGHT", 64)
 	if err != nil {
 		return Config{}, err
+	}
+	responseSlots, err := positiveIntFromEnv("AGGREGATOR_RESPONSE_SLOTS", 128)
+	if err != nil || responseSlots > 256 {
+		return Config{}, fmt.Errorf("AGGREGATOR_RESPONSE_SLOTS must be between 1 and 256")
+	}
+	sharedProjection, err := strconv.ParseBool(envOrDefault("AGGREGATOR_SHARED_READ_PROJECTION", "true"))
+	if err != nil {
+		return Config{}, fmt.Errorf("AGGREGATOR_SHARED_READ_PROJECTION must be boolean")
+	}
+	fieldReserve, err := strconv.Atoi(envOrDefault("AGGREGATOR_FIELD_RESERVED_SLOTS", strconv.Itoa(maxInFlight/4)))
+	if err != nil || fieldReserve < 0 || fieldReserve >= maxInFlight {
+		return Config{}, fmt.Errorf("AGGREGATOR_FIELD_RESERVED_SLOTS must be nonnegative and below AGGREGATOR_MAX_IN_FLIGHT")
+	}
+	readCacheMS, err := strconv.Atoi(envOrDefault("AGGREGATOR_READ_CACHE_TTL_MS", "100"))
+	if err != nil || readCacheMS < 0 || readCacheMS > 1000 {
+		return Config{}, fmt.Errorf("AGGREGATOR_READ_CACHE_TTL_MS must be between 0 and 1000")
 	}
 	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	// p1 three units or explicit single-database compatibility.
@@ -72,6 +103,40 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("P1_IMPORT_ONLY must be boolean")
 	}
+	coordinationTimeout, err := durationFromEnv("COORDINATION_TIMEOUT_MS", 2000)
+	if err != nil {
+		return Config{}, err
+	}
+	leaseTTL, err := durationFromEnv("AGGREGATOR_LEASE_TTL_MS", 15000)
+	if err != nil {
+		return Config{}, err
+	}
+	if leaseTTL <= httpTimeout*2 {
+		return Config{}, fmt.Errorf("AGGREGATOR_LEASE_TTL_MS must exceed twice AGGREGATOR_HTTP_TIMEOUT_MS")
+	}
+	if coordinationTimeout >= leaseTTL/3 {
+		return Config{}, fmt.Errorf("COORDINATION_TIMEOUT_MS must be below one third of AGGREGATOR_LEASE_TTL_MS")
+	}
+	coastalInterval, err := durationFromEnv("COASTAL_POLL_INTERVAL_MS", 500)
+	if err != nil {
+		return Config{}, err
+	}
+	coastalTimeout, err := durationFromEnv("COASTAL_HTTP_TIMEOUT_MS", 1000)
+	if err != nil {
+		return Config{}, err
+	}
+	coastalMaxStaleness, err := durationFromEnv("COASTAL_MAX_STALENESS_MS", 30000)
+	if err != nil {
+		return Config{}, err
+	}
+	circuitFailures, err := positiveIntFromEnv("COASTAL_CIRCUIT_FAILURES", 3)
+	if err != nil {
+		return Config{}, err
+	}
+	circuitOpenDuration, err := durationFromEnv("COASTAL_CIRCUIT_OPEN_MS", 2000)
+	if err != nil {
+		return Config{}, err
+	}
 
 	startSince := time.Unix(0, 0).UTC()
 	if raw := os.Getenv("AGGREGATOR_START_SINCE"); raw != "" {
@@ -80,23 +145,55 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("AGGREGATOR_START_SINCE must be RFC3339: %w", err)
 		}
 	}
+	instanceID := strings.TrimSpace(os.Getenv("AGGREGATOR_INSTANCE_ID"))
+	if instanceID == "" {
+		instanceID, _ = os.Hostname()
+	}
+	if instanceID == "" {
+		return Config{}, fmt.Errorf("AGGREGATOR_INSTANCE_ID or hostname is required")
+	}
+	coordinationURL := strings.TrimSpace(os.Getenv("COORDINATION_DATABASE_URL"))
+	if coordinationURL == "" {
+		coordinationURL = databaseURL
+	}
+	if coordinationURL == "" {
+		return Config{}, fmt.Errorf("COORDINATION_DATABASE_URL is required when DATABASE_URL is empty")
+	}
 
 	return Config{
-		StorageUnits: units, StoreTimeout: timeout, AuditToken: os.Getenv("P1_AUDIT_TOKEN"), ImportOnly: importOnly,
-		ListenAddress:   envOrDefault("AGGREGATOR_LISTEN_ADDRESS", ":8083"),
-		DatabaseURL:     databaseURL,
-		KafkaBrokers:    splitCommaSeparated(os.Getenv("KAFKA_BROKERS"), "localhost:9092"),
-		KafkaTopic:      envOrDefault("KAFKA_TOPIC", "hazard.events.v1"),
-		BMKGURL:         envOrDefault("BMKG_URL", "http://localhost:8081"),
-		BMKGAPIKey:      os.Getenv("BMKG_API_KEY"),
-		PVMBGURL:        envOrDefault("PVMBG_URL", "http://localhost:8082"),
-		PVMBGToken:      os.Getenv("PVMBG_TOKEN"),
-		SatelliteURL:    envOrDefault("SATELLITE_URL", "https://satellite.naufarrel.dev"),
-		SatelliteToken:  os.Getenv("SATELLITE_TOKEN"),
-		PollingInterval: pollingInterval,
-		HTTPTimeout:     httpTimeout,
-		MaxInFlight:     maxInFlight,
-		StartSince:      startSince,
+		StorageUnits:         units,
+		StoreTimeout:         timeout,
+		CoordinationURL:      coordinationURL,
+		CoordinationTimeout:  coordinationTimeout,
+		AuditToken:           os.Getenv("P1_AUDIT_TOKEN"),
+		ImportOnly:           importOnly,
+		InstanceID:           instanceID,
+		LeaseTTL:             leaseTTL,
+		ListenAddress:        envOrDefault("AGGREGATOR_LISTEN_ADDRESS", ":8083"),
+		DatabaseURL:          databaseURL,
+		KafkaBrokers:         splitCommaSeparated(os.Getenv("KAFKA_BROKERS"), "localhost:9092"),
+		KafkaTopic:           envOrDefault("KAFKA_TOPIC", "hazard.events.v1"),
+		BMKGURL:              envOrDefault("BMKG_URL", "http://localhost:8081"),
+		BMKGAPIKey:           os.Getenv("BMKG_API_KEY"),
+		PVMBGURL:             envOrDefault("PVMBG_URL", "http://localhost:8082"),
+		PVMBGToken:           os.Getenv("PVMBG_TOKEN"),
+		SatelliteURL:         envOrDefault("SATELLITE_URL", "https://satellite.naufarrel.dev"),
+		SatelliteToken:       os.Getenv("SATELLITE_TOKEN"),
+		CoastalURL:           envOrDefault("COASTAL_URL", "http://sensor-pantai:8080"),
+		CoastalToken:         os.Getenv("PANTAI_AUTH_TOKEN"),
+		PollingInterval:      pollingInterval,
+		CoastalInterval:      coastalInterval,
+		HTTPTimeout:          httpTimeout,
+		CoastalTimeout:       coastalTimeout,
+		CoastalMaxStaleness:  coastalMaxStaleness,
+		CircuitFailures:      circuitFailures,
+		CircuitOpenDuration:  circuitOpenDuration,
+		MaxInFlight:          maxInFlight,
+		ResponseSlots:        responseSlots,
+		SharedReadProjection: sharedProjection,
+		FieldReservedSlots:   fieldReserve,
+		ReadCacheTTL:         time.Duration(readCacheMS) * time.Millisecond,
+		StartSince:           startSince,
 	}, nil
 }
 

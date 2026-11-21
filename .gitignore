@@ -1,3 +1,30 @@
 .env
+.env.*
+!.env.example
 *.pem
+*.key
+*.p12
+*.pfx
 secrets/
+.e2e/
+__pycache__/
+.vps/
+infra/vps/inventory.json
+*.tfstate*
+.terraform/
+*.tfvars
+
+# Local test runs, machine credentials and disposable build output.
+*.py[cod]
+.pytest_cache/
+coverage.out
+*.test
+/infra/vps/inventory.*.json
+!/infra/vps/inventory.example.json
+
+# Keep reusable design/operations guides in Git, not dated operator journals.
+# These files remain local; docs/README.md links the published status.
+/docs/changelog/*-20??-??-??.md
+!/docs/changelog/verification-2026-11-19.md
+/infra/vps/*-20??-??-??.md
+/scripts/m2/e2e/retest-20??-??-??.md

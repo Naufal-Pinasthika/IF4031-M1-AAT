@@ -65,12 +65,13 @@ func (c *Consumer) Run(ctx context.Context) {
 		}
 
 		messageID := message.Topic + ":" + strconv.Itoa(message.Partition) + ":" + strconv.FormatInt(message.Offset, 10)
+		applyStarted := time.Now()
 		applied, err := c.store.Apply(messageID, envelope)
 		if err != nil {
 			c.logger.Error("dashboard_update_failed", "error", err, "correlation_id", correlationID, "message_id", messageID)
 			continue
 		}
-		c.logger.Info("dashboard_event_applied", "correlation_id", correlationID, "message_id", messageID, "hazard_id", envelope.Data.HazardID, "applied", applied)
+		c.logger.Info("dashboard_event_applied", "correlation_id", correlationID, "message_id", messageID, "hazard_id", envelope.Data.HazardID, "applied", applied, "latency_ms", time.Since(applyStarted).Milliseconds())
 		c.commit(ctx, message, correlationID)
 	}
 }

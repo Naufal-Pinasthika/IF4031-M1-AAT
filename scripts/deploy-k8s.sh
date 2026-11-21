@@ -20,12 +20,12 @@ usage() {
   cat <<'EOF'
 Usage: bash scripts/deploy-k8s.sh [options]
 
-Deploy the P1 application to an already configured Kubernetes cluster.
+Deploy the M2 application to an already configured Kubernetes cluster.
 If .env does not exist, setup-env.sh creates it without replacing existing secrets.
 
   --minikube                 Build and load local images, then deploy to Minikube
   --k3s                      Deploy pre-imported images to the active k3s context
-  --build                    Build all seven application images with Docker
+  --build                    Build applications and the observability image
   --push                     Push application images to --image-prefix
   --context CONTEXT          Use a specific kubeconfig context
   --image-prefix PREFIX      Image prefix, e.g. docker.io/your-user (default: aat)
@@ -123,7 +123,7 @@ if item['provisioner'] not in ('rancher.io/local-path', 'k8s.io/minikube-hostpat
 print(item['metadata']['name'])
 PY
 )"
-"${kube[@]}" -n "${NAMESPACE}" get secrets postgres-credentials auth-postgres-credentials \
+"${kube[@]}" -n "${NAMESPACE}" get secrets postgres-credentials auth-postgres-credentials aggregator-coordinator-credentials \
   --ignore-not-found -o json > "${render_dir}/existing-secrets.json"
 "${kube[@]}" -n "${NAMESPACE}" get configmap postgres-config \
   --ignore-not-found -o json > "${render_dir}/existing-postgres-config.json"
@@ -137,7 +137,7 @@ for stage in platform jobs apps; do
   "${kube[@]}" kustomize "${render_dir}/${stage}" > "${render_dir}/${stage}.yaml"
 done
 
-services=(aggregator auth bmkg client-api dashboard-consumer notifier-consumer pvmbg)
+services=(aggregator auth bmkg client-api dashboard-consumer notifier-consumer pvmbg observability)
 if [[ "${build}" == true ]]; then
   command -v docker >/dev/null || { echo 'error: Docker is required for --build' >&2; exit 1; }
   for service in "${services[@]}"; do
@@ -160,20 +160,40 @@ fi
 # Dependencies start first, so application startup cannot race topic creation.
 "${kube[@]}" apply -f "${render_dir}/platform.yaml"
 # p1: initialize all three storage units before starting applications.
-for workload in postgres-a postgres-b postgres-c auth-postgres kafka; do
+for workload in postgres-a postgres-b postgres-c aggregator-coordinator auth-postgres kafka; do
   "${kube[@]}" -n "${NAMESPACE}" rollout status "statefulset/${workload}" --timeout="${timeout}"
 done
 # Only the idempotent topic-provisioning Job is replaced, never PVCs or data.
 "${kube[@]}" -n "${NAMESPACE}" delete job kafka-init --ignore-not-found --wait=true --timeout=60s
 "${kube[@]}" apply -f "${render_dir}/jobs.yaml"
 "${kube[@]}" -n "${NAMESPACE}" wait --for=condition=complete job/kafka-init --timeout="${timeout}"
-"${kube[@]}" apply -f "${render_dir}/apps.yaml"
-for service in aggregator auth bmkg client-api pvmbg; do
+"${kube[@]}" create --dry-run=client -f "${render_dir}/apps.yaml" -o json > "${render_dir}/apps.json"
+python3 - "${render_dir}" <<'PY'
+import json, pathlib, sys
+directory = pathlib.Path(sys.argv[1])
+remaining = (directory / 'apps.json').read_text().lstrip()
+decoder = json.JSONDecoder()
+items = []
+while remaining:
+    resource, end = decoder.raw_decode(remaining)
+    items.extend(resource.get('items', [resource]))
+    remaining = remaining[end:].lstrip()
+sensor = [r for r in items if r['kind'] == 'Deployment' and r['metadata']['name'] == 'sensor-pantai']
+others = [r for r in items if r not in sensor]
+for name, group in [('core-apps', others), ('sensor-app', sensor)]:
+    (directory / (name + '.json')).write_text(json.dumps({'apiVersion':'v1', 'kind':'List', 'items':group}))
+PY
+"${kube[@]}" apply -f "${render_dir}/core-apps.json"
+for service in aggregator aggregator-gateway auth bmkg client-api pvmbg; do
   "${kube[@]}" -n "${NAMESPACE}" rollout status "deployment/${service}" --timeout="${timeout}"
 done
 for service in dashboard-consumer notifier-consumer; do
   "${kube[@]}" -n "${NAMESPACE}" rollout status "statefulset/${service}" --timeout="${timeout}"
 done
+# On first deployment, do not start the sensor's clock before receivers exist.
+# Existing sensor pods are left running during upgrades (never scaled down).
+"${kube[@]}" apply -f "${render_dir}/sensor-app.json"
+"${kube[@]}" -n "${NAMESPACE}" rollout status deployment/sensor-pantai --timeout="${timeout}"
 "${kube[@]}" -n "${NAMESPACE}" get pods -o wide
 # p1
-echo "Deployed P1 Kubernetes stack with image tag ${image_tag}."
+echo "Deployed M2 Kubernetes stack with image tag ${image_tag}."

@@ -5,8 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/notifier-consumer/internal/store"
@@ -28,15 +31,43 @@ func New(notificationStore *store.Store, probe BrokerProbe, logger *slog.Logger,
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
 	mux.HandleFunc("GET /notifications", server.notifications)
+	mux.HandleFunc("POST /notifications/confirm", server.confirmNotification)
 	mux.HandleFunc("GET /stats", server.stats)
+	mux.HandleFunc("GET /metrics", server.metrics)
 	return server.logging(mux)
+}
+
+func (s *Server) confirmNotification(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		HazardID string `json:"hazard_id"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeJSON(w, 400, map[string]string{"error": "invalid confirmation request"})
+		return
+	}
+	n, err := s.store.ConfirmNotification(r.Context(), body.HazardID)
+	if errors.Is(err, store.ErrInvalidPage) {
+		writeJSON(w, 400, map[string]string{"error": "invalid hazard ID"})
+		return
+	}
+	if errors.Is(err, store.ErrNotificationAbsent) {
+		writeJSON(w, 404, map[string]string{"error": "notification absent"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, 503, map[string]string{"error": "durability confirmation unavailable"})
+		return
+	}
+	writeJSON(w, 200, map[string]any{"notification": n, "durability_confirmed": true})
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.healthTimeout)
 	defer cancel()
 	started := time.Now()
-	err := s.probe.Probe(ctx)
+	err := errors.Join(s.probe.Probe(ctx), s.store.Ping(ctx))
 	s.logger.Info("kafka_health_probe", "correlation_id", correlationID(r.Context()), "latency_ms", time.Since(started).Milliseconds(), "error", err)
 	if err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable", "dependency": "kafka"})
@@ -45,22 +76,50 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Server) notifications(w http.ResponseWriter, _ *http.Request) {
-	items, err := s.store.Notifications()
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "read notifications"})
+func (s *Server) notifications(w http.ResponseWriter, r *http.Request) {
+	limit := 500
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 1000 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be between 1 and 1000"})
+			return
+		}
+		limit = parsed
+	}
+	page, err := s.store.ListNotifications(r.Context(), limit, r.URL.Query().Get("cursor"))
+	if errors.Is(err, store.ErrInvalidPage) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid notification cursor"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"notifications": items})
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "notification storage unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
 }
 
 func (s *Server) stats(w http.ResponseWriter, _ *http.Request) {
 	stats, err := s.store.Stats()
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "read notifier stats"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "notifier statistics unavailable"})
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) metrics(w http.ResponseWriter, _ *http.Request) {
+	stats, err := s.store.Stats()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "notifier metrics unavailable"})
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprintf(w, "# TYPE notifier_notifications_total gauge\nnotifier_notifications_total %d\n", stats.NotificationCount)
+	_, _ = fmt.Fprintf(w, "# TYPE notifier_coastal_critical_total gauge\nnotifier_coastal_critical_total %d\n", stats.CoastalCriticalCount)
+	_, _ = fmt.Fprintf(w, "# TYPE notifier_pipeline_latency_p95_ms gauge\nnotifier_pipeline_latency_p95_ms %d\n", stats.P95PipelineLatencyMS)
+	_, _ = fmt.Fprintf(w, "# TYPE notifier_source_latency_p95_ms gauge\nnotifier_source_latency_p95_ms %d\n", stats.P95SourceLatencyMS)
+	_, _ = fmt.Fprintf(w, "# TYPE notifier_coastal_critical_ingress_latency_p95_ms gauge\nnotifier_coastal_critical_ingress_latency_p95_ms %d\n", stats.P95CoastalCriticalIngressMS)
 }
 
 type correlationKey struct{}

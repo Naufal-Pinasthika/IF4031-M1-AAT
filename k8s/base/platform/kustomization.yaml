@@ -4,6 +4,7 @@ namespace: sistem-informasi-kebencanaan-bnpb
 resources:
 - namespace.yaml
 - postgres.yaml
+- aggregator-coordinator.yaml
 # p1
 - p1-storage.yaml
 - kafka.yaml

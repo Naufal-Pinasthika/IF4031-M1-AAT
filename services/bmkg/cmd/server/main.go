@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/bmkg/internal/telemetry"
 	"log/slog"
 	"net/http"
 	"os"
@@ -55,7 +56,7 @@ func main() {
 	})
 
 	logger.Info("bmkg_server_started", "address", ":8081", "event_interval_ms", eventInterval.Milliseconds())
-	if err := http.ListenAndServe(":8081", r); err != nil {
+	if err := http.ListenAndServe(":8081", telemetry.Wrap(r, false)); err != nil {
 		logger.Error("bmkg_server_stopped", "error", err)
 		os.Exit(1)
 	}

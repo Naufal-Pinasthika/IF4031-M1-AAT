@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/pvmbg/internal/telemetry"
 	"log/slog"
 	"net/http"
 	"os"
@@ -87,7 +88,7 @@ func main() {
 	})
 
 	logger.Info("pvmbg_server_started", "address", ":8082", "delay_min_ms", minDelay.Milliseconds(), "delay_max_ms", maxDelay.Milliseconds(), "event_interval_ms", eventInterval.Milliseconds())
-	if err := http.ListenAndServe(":8082", r); err != nil {
+	if err := http.ListenAndServe(":8082", telemetry.Wrap(r, false)); err != nil {
 		logger.Error("pvmbg_server_stopped", "error", err)
 		os.Exit(1)
 	}

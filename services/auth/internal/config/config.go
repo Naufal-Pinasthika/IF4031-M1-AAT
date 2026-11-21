@@ -51,7 +51,7 @@ func Load() (Config, error) {
 	clients := []SeedClient{
 		{ID: os.Getenv("MEDIA_CLIENT_ID"), Secret: os.Getenv("MEDIA_CLIENT_SECRET"), Scopes: []string{"hazards:read:summary"}},
 		{ID: os.Getenv("FIELD_CLIENT_ID"), Secret: os.Getenv("FIELD_CLIENT_SECRET"), Scopes: []string{"hazards:read:summary", "hazards:read:raw"}},
-		{ID: os.Getenv("OPS_CLIENT_ID"), Secret: os.Getenv("OPS_CLIENT_SECRET"), Scopes: []string{"hazards:read:summary", "hazards:read:raw"}},
+		{ID: os.Getenv("OPS_CLIENT_ID"), Secret: os.Getenv("OPS_CLIENT_SECRET"), Scopes: []string{"hazards:read:summary", "hazards:read:raw", "hazards:read:ops"}},
 	}
 	if err := validateClients(clients); err != nil {
 		return Config{}, err

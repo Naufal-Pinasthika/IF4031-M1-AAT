@@ -12,11 +12,14 @@ import (
 
 // p1 canonical store private to Aggregator
 type P1Handler struct {
-	store      *store.Store
-	auditToken string
+	store       *store.Store
+	coordinator *store.Coordinator
+	auditToken  string
 }
 
-func NewP1(s *store.Store, token string) *P1Handler { return &P1Handler{store: s, auditToken: token} }
+func NewP1(s *store.Store, coordinator *store.Coordinator, token string) *P1Handler {
+	return &P1Handler{store: s, coordinator: coordinator, auditToken: token}
+}
 
 func auditError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]string{"code": code, "message": message}})
@@ -60,7 +63,7 @@ func (h *P1Handler) GetAuditEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, 200, map[string]any{"items": page.Events, "next_cursor": page.NextCursor, "partial": page.Partial, "unavailable_units": page.UnavailableUnits})
+	writeJSON(w, 200, map[string]any{"items": page.Events, "next_cursor": page.NextCursor, "partial": page.Partial, "unavailable_units": page.UnavailableUnits, "replication_degraded": page.ReplicationDegraded, "lagging_units": page.LaggingUnits})
 }
 
 func (h *P1Handler) GetAuditChecksum(w http.ResponseWriter, r *http.Request) {
@@ -88,4 +91,26 @@ func (h *P1Handler) GetAuditLocation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, result)
+}
+
+func (h *P1Handler) GetAuditUnprocessed(w http.ResponseWriter, r *http.Request) {
+	limit := 100
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 1000 {
+			auditError(w, 400, "invalid_parameter", "limit must be between 1 and 1000")
+			return
+		}
+		limit = value
+	}
+	page, err := h.coordinator.ListUnprocessed(r.Context(), r.URL.Query().Get("source"), limit, r.URL.Query().Get("cursor"))
+	if err != nil {
+		if errors.Is(err, store.ErrInvalidCursor) {
+			auditError(w, 400, "invalid_cursor", "cursor tidak valid")
+		} else {
+			auditError(w, 503, "unavailable", "audit unavailable")
+		}
+		return
+	}
+	writeJSON(w, 200, page)
 }

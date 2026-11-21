@@ -9,21 +9,24 @@ ENV_FILE="${REPO_ROOT}/.env"
 
 usage() {
   cat <<'EOF'
-Usage: bash ./scripts/setup-env.sh [--force]
+Usage: bash ./scripts/setup-env.sh [--force|--merge]
 
-Create .env from .env.example, generate unique local secrets, and generate
-the RSA private key used by Auth Service.
+Create or upgrade .env from .env.example, generate unique local secrets, and
+generate the RSA private key used by Auth Service when it is missing.
 
 Options:
   --force  Replace an existing .env file.
+  --merge  Add missing variables and secrets without replacing existing values.
   -h, --help  Show this help message.
 EOF
 }
 
 force=false
+merge=false
 case "${1:-}" in
   "") ;;
   --force) force=true ;;
+  --merge) merge=true ;;
   -h|--help)
     usage
     exit 0
@@ -39,7 +42,7 @@ if [[ ! -f "${ENV_EXAMPLE}" ]]; then
   exit 1
 fi
 
-if [[ -e "${ENV_FILE}" && "${force}" != true ]]; then
+if [[ -e "${ENV_FILE}" && "${force}" != true && "${merge}" != true ]]; then
   echo "error: ${ENV_FILE} already exists" >&2
   echo "Run with --force only if the existing local configuration may be replaced." >&2
   exit 1
@@ -54,7 +57,25 @@ done
 
 TEMP_ENV="$(mktemp "${REPO_ROOT}/.env.tmp.XXXXXX")"
 trap 'rm -f "${TEMP_ENV}"' EXIT
-cp "${ENV_EXAMPLE}" "${TEMP_ENV}"
+if [[ -e "${ENV_FILE}" && "${merge}" == true ]]; then
+  cp "${ENV_FILE}" "${TEMP_ENV}"
+  added_heading=false
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    line="${line%$'\r'}"
+    if [[ "${line}" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]]; then
+      key="${BASH_REMATCH[1]}"
+      if ! grep -q "^${key}=" "${TEMP_ENV}"; then
+        if [[ "${added_heading}" == false ]]; then
+          printf '\n# Added by setup-env.sh --merge\n' >> "${TEMP_ENV}"
+          added_heading=true
+        fi
+        printf '%s\n' "${line}" >> "${TEMP_ENV}"
+      fi
+    fi
+  done < "${ENV_EXAMPLE}"
+else
+  cp "${ENV_EXAMPLE}" "${TEMP_ENV}"
+fi
 sed -i 's/\r$//' "${TEMP_ENV}"
 
 replace_secret() {
@@ -68,10 +89,12 @@ replace_secret() {
 for placeholder in \
   replace-with-bmkg-api-key \
   replace-with-pvmbg-token \
+  replace-with-pantai-auth-token \
   replace-with-aggregator-api-key \
   replace-with-audit-token \
   replace-with-postgres-admin-password \
   replace-with-aggregator-app-password \
+  replace-with-coordinator-postgres-password \
   replace-with-auth-postgres-password \
   replace-with-unique-media-secret \
   replace-with-unique-field-secret \
@@ -101,5 +124,5 @@ mv -f "${TEMP_ENV}" "${ENV_FILE}"
 trap - EXIT
 chmod 600 "${ENV_FILE}" 2>/dev/null || true
 
-echo "Created ${ENV_FILE} with unique local secrets and a generated JWT key."
+echo "Prepared ${ENV_FILE}; missing local secrets and the JWT key were generated as needed."
 echo "Review the file, then run: docker compose config --quiet"

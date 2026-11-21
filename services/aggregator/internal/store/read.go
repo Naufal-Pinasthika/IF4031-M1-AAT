@@ -16,6 +16,8 @@ import (
 // p1
 var ErrInvalidCursor = errors.New("invalid cursor")
 
+var ErrStorageBusy = errors.New("storage query budget exhausted")
+
 // p1 Audit changes ordering and time filtering, never the canonical replica selection
 type EventFilter struct {
 	Source, HazardType, Severity string
@@ -79,6 +81,7 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) (EventPage, error
 	}
 	type partResult struct {
 		events []model.HazardEvent
+		status ReadStatus
 		err    error
 	}
 	results := make(chan partResult, 3)
@@ -88,17 +91,19 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) (EventPage, error
 	}
 	for partition := 0; partition < partitions; partition++ {
 		go func(p int) {
-			events, err := s.readPartition(ctx, p, f, c, f.Offset+f.Limit+1)
-			results <- partResult{events, err}
+			events, status, err := s.readPartition(ctx, p, f, c, f.Offset+f.Limit+1)
+			results <- partResult{events, status, err}
 		}(partition)
 	}
 	events := make([]model.HazardEvent, 0)
+	status := ReadStatus{UnavailableUnits: []string{}}
 	for i := 0; i < partitions; i++ {
 		result := <-results
 		if result.err != nil {
 			return EventPage{}, result.err
 		}
 		events = append(events, result.events...)
+		status = mergeStatus(status, result.status)
 	}
 	sort.Slice(events, func(i, j int) bool {
 		a, b := events[i].OccuredAt, events[j].OccuredAt
@@ -133,12 +138,19 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) (EventPage, error
 		str := base64.RawURLEncoding.EncodeToString(b)
 		next = &str
 	}
-	return EventPage{Events: events, NextCursor: next, ReadStatus: s.readStatus()}, nil
+	health := s.readStatus()
+	if health.Partial {
+		for _, name := range health.UnavailableUnits {
+			s.logReadPartial(ctx, "metadata_degraded", "final_health", name, -1, f.Limit, nil)
+		}
+	}
+	return EventPage{Events: events, NextCursor: next, ReadStatus: mergeStatus(status, health)}, nil
 }
 
-// p1 only ready replicas can answer
-// each partition is queried once (with bounded fallback)
-func (s *Store) readPartition(ctx context.Context, partition int, f EventFilter, c *pageCursor, limit int) ([]model.HazardEvent, error) {
+// Query both assigned replicas, reconcile versions, then paginate the union.
+// Reachability is not evidence of replica completeness. A bounded inconsistent
+// page is explicitly partial; it must never silently certify an empty primary.
+func (s *Store) readPartition(ctx context.Context, partition int, f EventFilter, c *pageCursor, limit int) ([]model.HazardEvent, ReadStatus, error) {
 	conditions := []string{"partition_id=$1"}
 	args := []any{partition}
 	add := func(column, operator string, value any) {
@@ -175,45 +187,8 @@ func (s *Store) readPartition(ctx context.Context, partition int, f EventFilter,
 		conditions = append(conditions, fmt.Sprintf("(%s,hazard_id) %s ($%d,$%d)", column, op, len(args)-1, len(args)))
 	}
 	args = append(args, limit)
-	query := "SELECT " + eventColumns + " FROM hazard_events WHERE " + strings.Join(conditions, " AND ") + fmt.Sprintf(" ORDER BY %s %s,hazard_id %s LIMIT $%d", column, order, order, len(args))
-	for _, i := range s.destinations(partition) {
-		u := s.units[i]
-		s.state.RLock()
-		ready := u.ready && u.online
-		s.state.RUnlock()
-		if !ready {
-			continue
-		}
-		op, cancel := context.WithTimeout(ctx, s.timeout)
-		events, err := queryEvents(op, u, query, args...)
-		cancel()
-		if err == nil {
-			return events, nil
-		}
-		if !availabilityError(err) {
-			return nil, err
-		}
-		s.markDown(u)
-	}
-	return []model.HazardEvent{}, nil
-}
-
-// p1
-func queryEvents(ctx context.Context, u *unit, query string, args ...any) ([]model.HazardEvent, error) {
-	rows, err := u.pool.Query(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	events := make([]model.HazardEvent, 0)
-	for rows.Next() {
-		event, err := scanEvent(rows)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, event)
-	}
-	return events, rows.Err()
+	query := "SELECT " + recordColumns + " FROM hazard_events WHERE " + strings.Join(conditions, " AND ") + fmt.Sprintf(" ORDER BY %s %s,hazard_id %s LIMIT $%d", column, order, order, len(args))
+	return s.readReplicaUnion(ctx, partition, f, c, limit, query, args)
 }
 
 // p1

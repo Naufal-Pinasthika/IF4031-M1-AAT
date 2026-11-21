@@ -158,20 +158,35 @@ metadata:
   name: aggregator
 spec:
   selector:
-    app: aggregator
+    app: aggregator-gateway
   ports:
   - name: http
     port: 8083
-    targetPort: 8083
+    targetPort: http
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: aggregator
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: aggregator
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: aggregator
 spec:
-  replicas: 1
+  replicas: 3
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  minReadySeconds: 5
+  progressDeadlineSeconds: 180
   selector:
     matchLabels:
       app: aggregator
@@ -181,14 +196,16 @@ spec:
         app: aggregator
         role: aggregator
     spec:
-      # p1: keep services without HA available when a storage worker is lost.
+      terminationGracePeriodSeconds: 20
       affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: node-role.kubernetes.io/control-plane
-                operator: Exists
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app: aggregator
       automountServiceAccountToken: false
       containers:
       - name: aggregator
@@ -199,41 +216,62 @@ spec:
             name: aggregator-config
         - secretRef:
             name: aggregator-credentials
+        env:
+        - name: AGGREGATOR_INSTANCE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         ports:
         - name: http
           containerPort: 8083
         resources:
           requests:
+            # Protect database/control-plane scheduling under read saturation.
+            cpu: 250m
             memory: 256Mi
           limits:
+            # Tested 10k-VU budget; 750m starved read/control work under load.
+            # CPU is optional in M2's table; keep the prescribed memory limit.
+            cpu: "2"
             memory: 512Mi
         startupProbe:
-          tcpSocket:
-            port: 8083
+          httpGet:
+            path: /ready
+            port: http
           periodSeconds: 5
           timeoutSeconds: 2
           failureThreshold: 60
         readinessProbe:
           httpGet:
+            path: /ready
+            port: http
+          periodSeconds: 3
+          timeoutSeconds: 1
+          failureThreshold: 2
+        livenessProbe:
+          httpGet:
             path: /health
             port: http
           periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 3
-        livenessProbe:
-          tcpSocket:
-            port: 8083
-          periodSeconds: 10
           timeoutSeconds: 2
-          failureThreshold: 6
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "sleep 5"]
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
       topologySpreadConstraints:
       - maxSkew: 1
+        minDomains: 3
         topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: ScheduleAnyway
+        whenUnsatisfiable: DoNotSchedule
+        nodeTaintsPolicy: Honor
+        # Old surge pods must not let a new revision finish on only 2 nodes.
+        matchLabelKeys:
+        - pod-template-hash
         labelSelector:
           matchLabels:
             app: aggregator
@@ -493,6 +531,87 @@ spec:
       resources:
         requests:
           storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sensor-pantai
+spec:
+  selector:
+    app: sensor-pantai
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sensor-pantai
+  labels:
+    role: sensor
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: sensor-pantai
+  template:
+    metadata:
+      labels:
+        app: sensor-pantai
+        role: sensor
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - name: sensor
+        image: sustuna/sensor-pantai@sha256:51fbd90d3891ad6e9f5768ad330ffb65205644cb29e50da65c7538f2e0b4397d
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: sensor-pantai-config
+        env:
+        - name: PANTAI_AUTH_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: pantai-token
+              key: token
+        ports:
+        - name: http
+          containerPort: 8080
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 6
+        resources:
+          requests:
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: exam-key
+          mountPath: /var/run/pantai
+          readOnly: true
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: exam-key
+        secret:
+          secretName: pantai-key
+          optional: true
 ---
 apiVersion: v1
 kind: Service
