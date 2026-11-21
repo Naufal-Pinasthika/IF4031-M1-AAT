@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/notifier-consumer/internal/store"
@@ -20,13 +21,21 @@ type BrokerProbe interface {
 }
 
 type Server struct {
-	store         *store.Store
+	store         store.Backend
 	probe         BrokerProbe
 	logger        *slog.Logger
 	healthTimeout time.Duration
+	probeMu       sync.Mutex
+	activeProbe   *healthProbe
 }
 
-func New(notificationStore *store.Store, probe BrokerProbe, logger *slog.Logger, healthTimeout time.Duration) http.Handler {
+type healthProbe struct {
+	done       chan struct{}
+	err        error
+	dependency string
+}
+
+func New(notificationStore store.Backend, probe BrokerProbe, logger *slog.Logger, healthTimeout time.Duration) http.Handler {
 	server := &Server{store: notificationStore, probe: probe, logger: logger, healthTimeout: healthTimeout}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", server.health)
@@ -67,13 +76,49 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), s.healthTimeout)
 	defer cancel()
 	started := time.Now()
-	err := errors.Join(s.probe.Probe(ctx), s.store.Ping(ctx))
-	s.logger.Info("kafka_health_probe", "correlation_id", correlationID(r.Context()), "latency_ms", time.Since(started).Milliseconds(), "error", err)
+	probe := s.startProbe()
+	var err error
+	dependency := "probe_timeout"
+	select {
+	case <-probe.done:
+		err, dependency = probe.err, probe.dependency
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+	s.logger.Info("dependency_health_probe", "correlation_id", correlationID(r.Context()), "latency_ms", time.Since(started).Milliseconds(), "dependency", dependency, "error", err)
 	if err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable", "dependency": "kafka"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable", "dependency": dependency})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) startProbe() *healthProbe {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	if s.activeProbe != nil {
+		return s.activeProbe
+	}
+	probe := &healthProbe{done: make(chan struct{})}
+	s.activeProbe = probe
+	go func() {
+		// Coalesce overlapping HTTP/Kubernetes probes, without declaring a
+		// healthy dependency unavailable just because another probe is active.
+		// A stuck storage operation can retain at most this one worker.
+		ctx, cancel := context.WithTimeout(context.Background(), s.healthTimeout)
+		defer cancel()
+		probe.dependency = "kafka"
+		probe.err = s.probe.Probe(ctx)
+		if probe.err == nil {
+			probe.dependency = "storage"
+			probe.err = s.store.Ping(ctx)
+		}
+		s.probeMu.Lock()
+		close(probe.done)
+		s.activeProbe = nil
+		s.probeMu.Unlock()
+	}()
+	return probe
 }
 
 func (s *Server) notifications(w http.ResponseWriter, r *http.Request) {

@@ -18,19 +18,36 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "notifier-consumer")
+	slog.SetDefault(logger)
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("configuration_invalid", "error", err)
 		os.Exit(1)
 	}
-	notificationStore, err := store.Open(cfg.StorePath)
+	var notificationStore store.Backend
+	if cfg.DatabaseURL != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		notificationStore, err = store.OpenPostgres(ctx, cfg.DatabaseURL)
+		cancel()
+	} else {
+		notificationStore, err = store.Open(cfg.StorePath)
+	}
 	if err != nil {
 		logger.Error("store_initialization_failed", "error", err)
 		os.Exit(1)
 	}
 	defer notificationStore.Close()
 
-	streamConsumer := consumer.New(cfg.KafkaBrokers, cfg.KafkaTopic, cfg.ConsumerGroup, notificationStore, logger)
+	streamConsumer := consumer.Lanes{consumer.New(cfg.KafkaBrokers, cfg.KafkaTopic, cfg.ConsumerGroup, notificationStore, logger.With("lane", "general"))}
+	if cfg.CriticalTopic != "" {
+		group := cfg.ConsumerGroup + "-critical"
+		if cfg.ReplicaID != "" {
+			// Each stable replica reads every critical partition independently.
+			// A survivor never waits for the failed replica's group rebalance.
+			group += "-" + cfg.ReplicaID
+		}
+		streamConsumer = append(streamConsumer, consumer.New(cfg.KafkaBrokers, cfg.CriticalTopic, group, notificationStore, logger.With("lane", "critical")))
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go streamConsumer.Run(ctx)

@@ -31,18 +31,21 @@ type notificationStore interface {
 	Deliver(string, event.Envelope) (bool, error)
 }
 
-func New(brokers []string, topic, group string, notificationStore *store.Store, logger *slog.Logger) *Consumer {
+func New(brokers []string, topic, group string, notificationStore store.Backend, logger *slog.Logger) *Consumer {
 	return &Consumer{
 		reader: kafka.NewReader(kafka.ReaderConfig{
-			Brokers:        brokers,
-			GroupID:        group,
-			Topic:          topic,
-			MinBytes:       1,
-			MaxBytes:       1 << 20,
-			QueueCapacity:  2,
-			MaxWait:        time.Second,
-			CommitInterval: 0,
-			StartOffset:    kafka.FirstOffset,
+			Brokers:           brokers,
+			GroupID:           group,
+			Topic:             topic,
+			MinBytes:          1,
+			MaxBytes:          1 << 20,
+			QueueCapacity:     2,
+			MaxWait:           time.Second,
+			CommitInterval:    0,
+			StartOffset:       kafka.FirstOffset,
+			HeartbeatInterval: time.Second,
+			SessionTimeout:    6 * time.Second,
+			RebalanceTimeout:  6 * time.Second,
 		}),
 		brokers: brokers,
 		topic:   topic,
@@ -162,6 +165,14 @@ func (c *Consumer) probeBroker(ctx context.Context, broker string) error {
 		return err
 	}
 	defer connection.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := connection.SetDeadline(deadline); err != nil {
+			return err
+		}
+	}
+	// DialContext only bounds connection establishment, not metadata I/O.
+	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stop()
 	partitions, err := connection.ReadPartitions(c.topic)
 	if err != nil {
 		return err

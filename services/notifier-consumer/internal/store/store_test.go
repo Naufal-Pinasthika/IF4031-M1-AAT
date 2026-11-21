@@ -13,6 +13,36 @@ import (
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/notifier-consumer/internal/event"
 )
 
+func TestCriticalNotificationDeduplicatesAcrossTopicsAndRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := event.Envelope{EventType: event.UpsertedType,
+		Data: event.HazardEvent{HazardID: "contract-critical", SourceRefID: "opaque", Source: "SENSOR_PANTAI", Severity: "AWAS", Attributes: map[string]any{"critical": true}}}
+	first, err := s.Deliver("critical:0:1", envelope)
+	if err != nil || !first {
+		t.Fatalf("first: %v %v", first, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	second, err := s.Deliver("general:2:99", envelope)
+	if err != nil || second {
+		t.Fatalf("cross-topic replay duplicated notification: %v %v", second, err)
+	}
+	stats, err := s.Stats()
+	if err != nil || stats.NotificationCount != 1 || stats.ProcessedCount != 2 {
+		t.Fatalf("stats %+v: %v", stats, err)
+	}
+}
+
 func TestNotificationPaginationIsBoundedAndComplete(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "pages.db"))
 	if err != nil {
