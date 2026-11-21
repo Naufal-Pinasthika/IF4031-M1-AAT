@@ -22,6 +22,8 @@ import (
 // p1 delayed tsunami warnings look up the already persisted parent quake.
 type EventStore interface {
 	GetEventBySourceRef(context.Context, string, string) (store.EventLookup, error) // p1
+	ProcessSatelliteEvent(ctx context.Context, eventType string, payload []byte, offset int64) ([]model.HazardEvent, []model.HazardEvent, error)
+	SatelliteOffset(ctx context.Context) (int64, error)
 	UpsertAccepted(context.Context, *model.HazardEvent, int64) error
 	UpsertAcceptedTarget(context.Context, *model.HazardEvent, int64, string) error
 }
@@ -53,6 +55,7 @@ type EventPublisher interface {
 
 type Aggregator struct {
 	poller      *Poller
+	satellite   *SatelliteConsumer
 	store       EventStore
 	publisher   EventPublisher
 	config      config.Config
@@ -81,11 +84,17 @@ var volcanoReferences = map[string]volcanoReference{
 	"DUKONO":        {Name: "Gunung Dukono", Latitude: 1.69867327144, Longitude: 127.87801665200},
 }
 
-func NewAggregator(poller *Poller, eventStore EventStore, coordinator SourceCoordinator, publisher EventPublisher, cfg config.Config, logger *slog.Logger, tracker *status.Tracker) *Aggregator {
+func NewAggregator(poller *Poller, satellite *SatelliteConsumer, eventStore EventStore, coordinator SourceCoordinator, publisher EventPublisher, cfg config.Config, logger *slog.Logger, tracker *status.Tracker) *Aggregator {
 	return &Aggregator{
-		poller: poller, store: eventStore, coordinator: coordinator, publisher: publisher,
-		config: cfg, logger: logger, status: tracker,
-		coastal: NewCoastalClient(cfg.CoastalTimeout, cfg.CircuitFailures, cfg.CircuitOpenDuration, logger),
+		poller:      poller,
+		satellite:   satellite,
+		store:       eventStore,
+		coordinator: coordinator,
+		publisher:   publisher,
+		config:      cfg,
+		logger:      logger,
+		status:      tracker,
+		coastal:     NewCoastalClient(cfg.CoastalTimeout, cfg.CircuitFailures, cfg.CircuitOpenDuration, logger),
 	}
 }
 
@@ -93,10 +102,36 @@ func (a *Aggregator) Run(ctx context.Context) {
 	var workers sync.WaitGroup
 	workers.Go(func() { a.runBMKG(ctx) })
 	workers.Go(func() { a.runPVMBG(ctx) })
+	workers.Go(func() { a.runSatellite(ctx) })
 	if a.config.CoastalToken != "" {
 		workers.Go(func() { a.runCoastal(ctx) })
 	}
 	workers.Wait()
+}
+
+func (a *Aggregator) runSatellite(ctx context.Context) {
+	fromOffset, err := a.store.SatelliteOffset(ctx)
+	if err != nil {
+		a.logger.Error("satellite_offset_load_failed", "error", err)
+		return
+	}
+	err = a.satellite.Consume(ctx, fromOffset, func(event SatelliteStreamEvent) error {
+		events, deleted, err := a.store.ProcessSatelliteEvent(ctx, event.Type, event.Data, event.Offset)
+		if err != nil {
+			return err
+		}
+		for i := range events {
+			_ = events[i]
+		}
+		for i := range deleted {
+			_ = deleted[i]
+		}
+		a.status.Success("SATELIT", time.Now())
+		return nil
+	})
+	if err != nil && ctx.Err() == nil {
+		a.logger.Error("satellite_feed_failed", "error", err)
+	}
 }
 
 func (a *Aggregator) runBMKG(ctx context.Context) {
