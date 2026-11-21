@@ -31,7 +31,7 @@ CONFIG_KEYS = {
                    "COASTAL_MAX_STALENESS_MS", "COASTAL_CIRCUIT_FAILURES", "COASTAL_CIRCUIT_OPEN_MS",
                    # p1
                    "P1_STORE_TIMEOUT_MS", "P1_IMPORT_ONLY", "SATELLITE_URL", "PVMBG_ADAPTER_VERSION"),
-    "auth": ("AUTH_ACCESS_TOKEN_TTL_SECONDS", "AUTH_REFRESH_TOKEN_TTL_SECONDS", "AUTH_MAX_IN_FLIGHT",
+    "auth": ("AUTH_ACCESS_TOKEN_TTL_SECONDS", "AUTH_REFRESH_TOKEN_TTL_SECONDS", "AUTH_MAX_IN_FLIGHT", "AUTH_FIELD_RESERVED_SLOTS",
              "AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "AUTH_JWT_KEY_ID", "MEDIA_CLIENT_ID",
              "FIELD_CLIENT_ID", "OPS_CLIENT_ID"),
     "client-api": ("AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "CLIENT_API_MAX_IN_FLIGHT",
@@ -82,8 +82,15 @@ def runtime_resources(values):
     topic = values["KAFKA_TOPIC"]
     if topic in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]{1,249}", topic):
         raise ValueError("KAFKA_TOPIC must be a valid Kafka topic name")
+    critical_topic = values.get('KAFKA_CRITICAL_TOPIC') or 'hazard.critical.v1'
+    if critical_topic == topic or critical_topic in ('.', '..') or not re.fullmatch(r'[A-Za-z0-9._-]{1,249}', critical_topic):
+        raise ValueError('KAFKA_CRITICAL_TOPIC must be valid and distinct from KAFKA_TOPIC')
 
     configs = {name: {key: values[key] for key in keys} for name, keys in CONFIG_KEYS.items()}
+    configs['pvmbg']['PVMBG_ADMIN_LISTEN_ADDRESS'] = ':8089'
+    for name in ('aggregator', 'notifier-consumer'):
+        configs[name]['KAFKA_CRITICAL_TOPIC'] = critical_topic
+    configs['aggregator']['COASTAL_LEASE_TTL_MS'] = values.get('COASTAL_LEASE_TTL_MS') or '4000'
     configs["aggregator"].update({"BMKG_URL": "http://bmkg:8081", "PVMBG_URL": "http://pvmbg:8082",
                                   "COASTAL_URL": "http://sensor-pantai:8080",
                                   "KAFKA_BROKERS": "kafka:9092", "AGGREGATOR_LISTEN_ADDRESS": ":8083"})
@@ -103,7 +110,7 @@ def runtime_resources(values):
                                 "PGDATA": "/var/lib/postgresql/data/pgdata"}
     configs["aggregator-coordinator"] = {"POSTGRES_DB": "coordination", "POSTGRES_USER": "aggregator_coord",
                                           "PGDATA": "/var/lib/postgresql/data/pgdata"}
-    configs["kafka-init"] = {"KAFKA_TOPIC": topic}
+    configs["kafka-init"] = {"KAFKA_TOPIC": topic, 'KAFKA_CRITICAL_TOPIC': critical_topic}
 
     secrets = {
         "bmkg": {"BMKG_API_KEY": values["BMKG_API_KEY"]},

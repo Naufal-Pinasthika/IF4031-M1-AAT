@@ -119,6 +119,7 @@ services:
         condition: service_healthy
     environment:
       KAFKA_TOPIC: ${KAFKA_TOPIC:-hazard.events.v1}
+      KAFKA_CRITICAL_TOPIC: ${KAFKA_CRITICAL_TOPIC:-hazard.critical.v1}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -129,6 +130,9 @@ services:
           --topic "$${KAFKA_TOPIC}" \
           --partitions 3 \
           --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh \
+          --bootstrap-server kafka:9092 --create --if-not-exists \
+          --topic "$${KAFKA_CRITICAL_TOPIC}" --partitions 3 --replication-factor 1
 
   aggregator:
     build:
@@ -143,6 +147,7 @@ services:
       KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
       KAFKA_TOPIC: ${KAFKA_TOPIC:-hazard.events.v1}
       AGGREGATOR_LISTEN_ADDRESS: ${AGGREGATOR_LISTEN_ADDRESS:-:8083}
+      KAFKA_CRITICAL_TOPIC: ${KAFKA_CRITICAL_TOPIC:-hazard.critical.v1}
       BMKG_URL: ${BMKG_URL:-http://bmkg:8081}
       PVMBG_URL: ${PVMBG_URL:-http://pvmbg:8082}
       SATELLITE_URL: ${SATELLITE_URL:-https://satellite.naufarrel.dev}
@@ -158,9 +163,10 @@ services:
       COORDINATION_TIMEOUT_MS: ${COORDINATION_TIMEOUT_MS:-2000}
       COASTAL_POLL_INTERVAL_MS: ${COASTAL_POLL_INTERVAL_MS:-500}
       COASTAL_HTTP_TIMEOUT_MS: ${COASTAL_HTTP_TIMEOUT_MS:-1000}
+      COASTAL_LEASE_TTL_MS: ${COASTAL_LEASE_TTL_MS:-4000}
       COASTAL_MAX_STALENESS_MS: ${COASTAL_MAX_STALENESS_MS:-30000}
       COASTAL_CIRCUIT_FAILURES: ${COASTAL_CIRCUIT_FAILURES:-3}
-      COASTAL_CIRCUIT_OPEN_MS: ${COASTAL_CIRCUIT_OPEN_MS:-5000}
+      COASTAL_CIRCUIT_OPEN_MS: ${COASTAL_CIRCUIT_OPEN_MS:-2000}
     expose:
       - "8083"
     depends_on:
@@ -195,6 +201,7 @@ services:
       AUTH_ACCESS_TOKEN_TTL_SECONDS: ${AUTH_ACCESS_TOKEN_TTL_SECONDS:-60}
       AUTH_REFRESH_TOKEN_TTL_SECONDS: ${AUTH_REFRESH_TOKEN_TTL_SECONDS:-86400}
       AUTH_MAX_IN_FLIGHT: ${AUTH_MAX_IN_FLIGHT:-32}
+      AUTH_FIELD_RESERVED_SLOTS: ${AUTH_FIELD_RESERVED_SLOTS:-8}
       AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-bnpb-auth-service}
       AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-bnpb-client-api}
       AUTH_JWT_KEY_ID: ${AUTH_JWT_KEY_ID:-bnpb-auth-2026-01}
@@ -278,6 +285,7 @@ services:
       KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
       KAFKA_TOPIC: ${KAFKA_TOPIC:-hazard.events.v1}
       NOTIFIER_CONSUMER_GROUP: ${NOTIFIER_CONSUMER_GROUP:-field-notifier-v1}
+      KAFKA_CRITICAL_TOPIC: ${KAFKA_CRITICAL_TOPIC:-hazard.critical.v1}
       NOTIFIER_LISTEN_ADDRESS: ${NOTIFIER_LISTEN_ADDRESS:-:8086}
       NOTIFIER_STORE_PATH: ${NOTIFIER_STORE_PATH:-/data/notifier.db}
     ports:
