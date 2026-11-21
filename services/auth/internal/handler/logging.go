@@ -37,17 +37,7 @@ func Logging(logger *slog.Logger, next http.Handler) http.Handler {
 }
 
 func Limit(maxInFlight int, next http.Handler) http.Handler {
-	slots := make(chan struct{}, maxInFlight)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case slots <- struct{}{}:
-			defer func() { <-slots }()
-			next.ServeHTTP(w, r)
-		default:
-			w.Header().Set("Retry-After", "1")
-			writeError(w, http.StatusTooManyRequests, "server_busy", "too many active requests")
-		}
-	})
+	return LimitField(maxInFlight, 0, "", "", next)
 }
 
 func CorrelationID(ctx context.Context) string {

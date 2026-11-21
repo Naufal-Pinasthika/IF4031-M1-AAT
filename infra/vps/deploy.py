@@ -19,9 +19,9 @@ TESTER = 'https://raw.githubusercontent.com/susTuna/if4031-tester-agent/ebb55261
 
 
 def import_worker(hosts, node, tag):
-    source = subprocess.Popen(hosts.command(hosts.nodes[0], f'sudo -n cat /opt/aat/images/{tag}.tar'), stdout=subprocess.PIPE)
+    source = subprocess.Popen(hosts.command(hosts.nodes[0], f'sudo -n cat /opt/aat/images/{tag}.tar', multiplex=False), stdout=subprocess.PIPE)
     try:
-        target = subprocess.run(hosts.command(node, 'sudo -n k3s ctr images import -'), stdin=source.stdout)
+        target = subprocess.run(hosts.command(node, 'sudo -n k3s ctr images import -', multiplex=False), stdin=source.stdout, timeout=300)
         source.stdout.close()
         if source.wait() != 0 or target.returncode != 0:
             raise RuntimeError('Image transfer/import failed on ' + node['name'])

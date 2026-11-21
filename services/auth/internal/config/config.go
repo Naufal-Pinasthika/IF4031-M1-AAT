@@ -17,16 +17,18 @@ type SeedClient struct {
 }
 
 type Config struct {
-	ListenAddress  string
-	DatabaseURL    string
-	Issuer         string
-	Audience       string
-	KeyID          string
-	PrivateKeyPEM  []byte
-	AccessTokenTTL time.Duration
-	RefreshTTL     time.Duration
-	MaxInFlight    int
-	Clients        []SeedClient
+	ListenAddress      string
+	DatabaseURL        string
+	Issuer             string
+	Audience           string
+	KeyID              string
+	PrivateKeyPEM      []byte
+	AccessTokenTTL     time.Duration
+	RefreshTTL         time.Duration
+	MaxInFlight        int
+	FieldReservedSlots int
+	FieldClientID      string
+	Clients            []SeedClient
 }
 
 func Load() (Config, error) {
@@ -41,6 +43,10 @@ func Load() (Config, error) {
 	maxInFlight, err := positiveIntFromEnv("AUTH_MAX_IN_FLIGHT", 32)
 	if err != nil {
 		return Config{}, err
+	}
+	fieldReserve, err := strconv.Atoi(envOrDefault("AUTH_FIELD_RESERVED_SLOTS", strconv.Itoa(maxInFlight/4)))
+	if err != nil || fieldReserve < 0 || fieldReserve >= maxInFlight {
+		return Config{}, errors.New("AUTH_FIELD_RESERVED_SLOTS must be nonnegative and below AUTH_MAX_IN_FLIGHT")
 	}
 
 	privateKey, err := privateKeyFromEnv()
@@ -58,16 +64,18 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		ListenAddress:  envOrDefault("AUTH_LISTEN_ADDRESS", ":8084"),
-		DatabaseURL:    os.Getenv("AUTH_DATABASE_URL"),
-		Issuer:         envOrDefault("AUTH_JWT_ISSUER", "bnpb-auth-service"),
-		Audience:       envOrDefault("AUTH_JWT_AUDIENCE", "bnpb-client-api"),
-		KeyID:          envOrDefault("AUTH_JWT_KEY_ID", "bnpb-auth-2026-01"),
-		PrivateKeyPEM:  privateKey,
-		AccessTokenTTL: accessTTL,
-		RefreshTTL:     refreshTTL,
-		MaxInFlight:    maxInFlight,
-		Clients:        clients,
+		ListenAddress:      envOrDefault("AUTH_LISTEN_ADDRESS", ":8084"),
+		DatabaseURL:        os.Getenv("AUTH_DATABASE_URL"),
+		Issuer:             envOrDefault("AUTH_JWT_ISSUER", "bnpb-auth-service"),
+		Audience:           envOrDefault("AUTH_JWT_AUDIENCE", "bnpb-client-api"),
+		KeyID:              envOrDefault("AUTH_JWT_KEY_ID", "bnpb-auth-2026-01"),
+		PrivateKeyPEM:      privateKey,
+		AccessTokenTTL:     accessTTL,
+		RefreshTTL:         refreshTTL,
+		MaxInFlight:        maxInFlight,
+		FieldReservedSlots: fieldReserve,
+		FieldClientID:      os.Getenv("FIELD_CLIENT_ID"),
+		Clients:            clients,
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("AUTH_DATABASE_URL is required")

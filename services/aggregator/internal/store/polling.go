@@ -165,9 +165,13 @@ func (c *Coordinator) FinishPoll(ctx context.Context, attempt PollAttempt, inter
 	if result.RowsAffected() == 0 {
 		return ErrPollSuperseded
 	}
+	retryDelay, err := finishSourceRetry(op, tx, attempt, interval, pollErr)
+	if err != nil {
+		return err
+	}
 	_, err = tx.Exec(op, `UPDATE source_poll_heads h SET next_poll_at=CASE WHEN $3 THEN
  clock_timestamp()+($2*interval '1 millisecond') ELSE GREATEST(clock_timestamp(),p.started_at+($2*interval '1 millisecond')) END
- FROM poll_attempts p WHERE h.source=$1 AND p.poll_id=h.poll_id`, attempt.Source, interval.Milliseconds(), pollErr != nil)
+ FROM poll_attempts p WHERE h.source=$1 AND p.poll_id=h.poll_id`, attempt.Source, retryDelay.Milliseconds(), pollErr != nil)
 	if err != nil {
 		return err
 	}

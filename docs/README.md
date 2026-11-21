@@ -13,7 +13,7 @@ from the repository root unless stated otherwise.
 | Look up Compose APIs, credentials, and defaults | [API/configuration reference](reference/api-configuration.md) |
 | Demonstrate M1 cases | [M1 runbook](runbooks/m1-demo.md) |
 | Understand M2/manual demonstrations | [M2 guide](guides/m2.md) |
-| Run report-facing P1/P3/P4 E2E tests | [Test directory](../test/README.md) |
+| Run report-facing P1/P3/P4/P5 E2E tests | [Test directory](../test/README.md) |
 | Check what is actually proven | [Source/runtime and verification status](status/README.md) |
 
 ## Design and contracts
@@ -28,6 +28,8 @@ Design proposals, reviews, and implementation notes are collected in
 - [P2 read-capacity design](changelog/P2-read-capacity-design.md): measured bottlenecks and
   validation gates; not an acceptance pass.
 - [P5 observability](changelog/P5-observability.md): measurement boundaries and private dashboard.
+- [P5 resilience verification](changelog/P5-resilience-verification.md): notifier/index/Auth fixes,
+  repeated VPS results and explicit remaining acceptance gates.
 - [Whole-system review](changelog/M2-P2-P5-design-review.md): dependencies, trade-offs, and
   historical acceptance matrix.
 - [Design proposal](changelog/M2-P2-P5-design-proposal.md): proposals and alternatives;

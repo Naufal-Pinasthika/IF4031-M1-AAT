@@ -99,7 +99,7 @@ func TestLeastActiveSelectionAndDiscoveryExpiry(t *testing.T) {
 		t.Fatal("busy backend chosen")
 	}
 	picked.active.Add(-1)
-	g.discovered = time.Now().Add(-4 * time.Second)
+	g.discovered = time.Now().Add(-discoveryMaxAge - time.Second)
 	if g.pick() != nil {
 		t.Fatal("stale health reused after discovery stopped")
 	}
@@ -129,7 +129,7 @@ func TestTransientDiscoveryFailurePreservesOriginalLifetimeNotFailedHealth(t *te
 		t.Fatal("retained snapshot bypassed active failed health")
 	}
 	status.Store(http.StatusOK)
-	g.discovered = time.Now().Add(-4 * time.Second)
+	g.discovered = time.Now().Add(-discoveryMaxAge - time.Second)
 	g.discoveryFailed(t.Context(), errors.New("expired"))
 	if g.pick() != nil {
 		t.Fatal("expired discovery was revived by successful probe")

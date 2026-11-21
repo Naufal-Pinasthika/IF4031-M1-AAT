@@ -49,6 +49,7 @@ func (b *observedBody) Read(p []byte) (int, error) {
 	return n, err
 }
 func (g *Gateway) writeMetrics(w io.Writer) {
+	fmt.Fprintf(w, "gateway_read_failovers_total %d\n", g.readFailovers.Load())
 	fmt.Fprintf(w, "gateway_connections_open %d\n", g.connections.Load())
 	for _, name := range []string{"gateway_queue_wait_seconds", "gateway_upstream_headers_seconds", "gateway_body_lifetime_seconds"} {
 		fmt.Fprintf(w, "# TYPE %s histogram\n", name)

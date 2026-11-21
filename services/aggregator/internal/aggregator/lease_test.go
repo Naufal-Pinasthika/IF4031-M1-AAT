@@ -20,6 +20,13 @@ type renewalCoordinator struct {
 	renewals int
 }
 
+func TestCoastalFailoverBudgetDoesNotShortenOtherSources(t *testing.T) {
+	a := &Aggregator{config: config.Config{LeaseTTL: 15 * time.Second, CoastalLeaseTTL: 4 * time.Second}}
+	if a.sourceLeaseTTL("SENSOR_PANTAI") != 4*time.Second || a.sourceLeaseTTL("BMKG") != 15*time.Second || a.sourceLeaseTTL("PVMBG") != 15*time.Second {
+		t.Fatal("source lease isolation failed")
+	}
+}
+
 type pollCoordinator struct {
 	SourceCoordinator
 	begin                 func() (store.PollAttempt, bool, error)

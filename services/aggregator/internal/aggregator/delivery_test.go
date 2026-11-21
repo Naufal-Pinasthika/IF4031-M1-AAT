@@ -30,6 +30,22 @@ type publisherFunc func(context.Context, broker.EventEnvelope) error
 
 func (f publisherFunc) Publish(ctx context.Context, e broker.EventEnvelope) error { return f(ctx, e) }
 
+func TestCriticalProjectionUsesIndependentPublisher(t *testing.T) {
+	called := false
+	a := &Aggregator{logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		publisher: publisherFunc(func(context.Context, broker.EventEnvelope) error { return errors.New("general blocked") }),
+		criticalPublisher: publisherFunc(func(_ context.Context, e broker.EventEnvelope) error {
+			called = true
+			if e.IngestionVersion != 41 || e.CorrelationID != "critical-correlation" {
+				t.Fatal("lost durable identity")
+			}
+			return nil
+		})}
+	if err := a.deliverAccepted(t.Context(), store.AcceptedEvent{Version: 41, Target: "broker:critical", CorrelationID: "critical-correlation"}); err != nil || !called {
+		t.Fatalf("critical blocked by ordinary publisher: %v", err)
+	}
+}
+
 func TestProjectionFailureDoesNotSuppressOtherDestination(t *testing.T) {
 	for _, failed := range []string{"canonical", "broker"} {
 		t.Run(failed, func(t *testing.T) {

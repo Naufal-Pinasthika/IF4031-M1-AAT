@@ -3,6 +3,281 @@
 Snapshot: 22 November 2026 (WIB). Results below distinguish repeated practice
 E2E evidence from historical results and the later assistant/exam comparison.
 
+## Latest P5 critical-path update
+
+P5 work has resumed. **Overall P5 is still not passed.** Aggregator now runs
+`m2-p5-source-logs-20261122-r2`; notifier runs `m2-p5-critical-20261122-r1`,
+with an additional `hazard.critical.v1`
+topic and independently acknowledged outbox projection/consumer lane. The
+general event stream, original PVCs, credentials, consumer offsets and Sensor
+Pantai spec/state were retained. Gateway subsequently moved to
+`m2-p5-discovery-grace-20261122-r1` for the scoped routing fix below.
+Auth now runs `m2-p5-auth-queue-20261122-r3` for bounded Field burst admission.
+Production remains three
+Aggregators and one bbolt-backed notifier; redundant notifier cutover and
+Kafka/coordinator HA are not completed by this rollout.
+
+Repeated laptop-driven VPS evidence:
+
+| Test | Result | Private evidence under `.e2e/report-tests/p5/` |
+| --- | --- | --- |
+| Ordinary backlog isolation, 3 rounds | 90 critical alerts; p95 0.730 / 0.905 / 0.791 s while 9,825 / 19,445 / 29,032 ordinary records remained pending | `08-critical-lane/20261121T214026Z-c91fd6a1` |
+| Transport/payload/source-clock/polling-owner faults, 3 rounds with two timestamp origins each | 1,116 unique notifications, 396 critical, no missing identities; six window p95 values 3.113-3.792 s | `06-resilience/20261121T214215Z-6dcf59fc` |
+| Redundant notifier pod crashes, 3 rounds | 90 new critical alerts plus 3 priming alerts; exact 93 durable rows, no duplicates; crash-window p95 0.771 / 1.501 / 0.800 s | `09-notifier-failover/20261121T214955Z-6a5b4f38` |
+| Coastal contract validation, 3 rounds | Complete canonical audit contains exactly 21 valid identities; all 21 invalid payloads remain parked with reason/time and their contents intact | `10-contract/20261121T215627Z-7dbf0838` |
+| Genuine production-source outage, 3 x 30 s | 10 / 9 / 9 logged outbound attempts, each below bound 42; last-data Field read p95 0.118 / 0.283 / 0.064 s | `04-circuit/20261121T220522Z-cc95bd25` |
+| Immutable official-source observation, 3 x 90 s | All 3 observed critical identities durably confirmed; conservative latency upper bounds 1.297 / 1.130 / 1.097 s; no new critical sample in the third window; old production source remains unavailable | `07-source-age/20261121T220451Z-98029404` |
+| Priority overload, 3 x 60 s from the laptop | 601 / 600 / 600 Field requests, zero Field errors or dropped iterations; 350,351 / 337,023 / 343,581 controlled Media 429 responses | `02-load/20261121T221131Z-64c9bbf6` |
+| Source HTTP-error logging under the priority campaign | Two additional timestamp-origin windows: 372 unique notifications, 132 critical, zero missing identities; p95 3.755 / 3.668 s, actual source 503 logs retained | `06-resilience/20261121T221217Z-72ee29b5` |
+| Combined priority overload and tracing after the gateway fix, 3 x 120 s | 3,603 Field requests, zero Field failures or dropped iterations; all 9 sampled traces include Client API, gateway and Aggregator; BMKG successful-read p95 127.908 / 114.539 / 104.337 ms | `05-observability/20261121T223047Z-7a08b2cc`, `20261121T223247Z-3d5c62f6`, `20261121T223445Z-23397bb4` |
+| Concurrent notifier health during the last combined run, 3 x 10 s | 87 health/stats/metrics responses, all HTTP 200; maximum window p95 69.750 ms; same process, zero restarts | `00-health/20261121T223513Z-784472c2` |
+| Priority overload after the Auth queue fix, 3 x 60 s | 1,803 Field requests, zero Field failures or dropped iterations; all 65 Field token issue/refresh attempts returned HTTP 200 | `02-load/20261121T224620Z-2928c8f2` |
+| Final combined load/trace with the Auth queue, 120 s | 1,200 Field requests, zero Field failures/dropped iterations, 42 successful Field token attempts, all 3 cross-service traces present | `05-observability/20261121T224921Z-e744d097` |
+| Final log-subscription verification under the same priority load, 60 s | 601 successful Field requests and 40 successful Field token attempts; server-stream counts match both exactly | `02-load/20261121T225213Z-238e9b91` |
+
+These use a controlled HTTP contract source, real candidate services, Kafka and
+VPS databases. They do not replace the immutable official Sensor Pantai or
+establish official-source zero loss/latency. Timestamp origins test clock
+independence, not the age of the official process. The notifier crash experiment
+uses three independent critical consumer groups and a shared notifier-owned
+database, with two surviving readers; its production equivalent is not yet
+enabled. Kafka/coordinator crashes and node loss are separate gates.
+
+In the 396-alert campaign, **4** alerts exceeded five seconds (maximum **8.690 s**),
+against a 19-alert late budget for this sample size. Loss budget is zero.
+Passing aggregate/window p95 does not mean every alert met five seconds.
+The longest sample followed a controlled connection-reset phase; failed
+experiments and the original singleton's roughly 38-second crash result remain
+historical evidence, not erased by these new results.
+
+Service-local PostgreSQL regressions were actually run on a VPS: critical
+projection progress despite general-target failure, same-version replay,
+persisted retry cadence across owner changes, timestamp admission precision,
+concurrent notifier deduplication and idempotent legacy import passed. Their
+private logs are `.e2e/p5-aggregator-store-1795297596765060373/` and
+`.e2e/p5-notifier-store-1795297641861801530/`. Ordinary local Go tests/vet also pass;
+other environment-gated integration tests are not claimed as newly executed.
+
+Harness corrections are distinct from service fixes: Python 3.10 fractional
+RFC3339 parsing, stable-reader replacement checks against current rather than
+already-committed priming messages, and PostgreSQL regression search-path
+isolation. Earlier harness failures were retained. Four old regression-only
+tables containing exactly two test notifications and three processed test IDs
+were verified and removed from the coordinator public schema; production
+notification/canonical data was untouched. Future regression runs assert their
+temporary schema and clean it up. Build transfer fixes separate per-service
+archives and binary SSH streams; no application data was deleted.
+
+Rollout evidence: `.e2e/critical-lane-rollout-20261121T215119Z/` and
+`.e2e/aggregator-update-20261121T221017Z/`. The r2 delta records one outbound
+attempt log for HTTP errors and incomplete response bodies as well as network
+failures/successes, including status, correlation ID and duration without tokens.
+Previously HTTP 503/body failures could be absent from the attempted-request
+count. Three repeated unit regressions for HTTP 200, HTTP 503 and truncated
+response bodies pass; full Aggregator/notifier Go tests and vet pass.
+
+Official-source observation uses only public contract endpoints and opaque
+cursors, never internal state or a selected virtual age. Its bounded independent
+observer now reaches actual empty pages; the earlier one-request-per-sample
+observer continually trailed live arrivals and could not establish availability
+bounds. The earlier inconclusive run remains retained. No source image, memory
+limit, production pod/state or cursor was reset. The new run is still
+**inconclusive as a whole**: only three bounded critical samples, an empty
+critical-sample window and no production-source recovery do not establish
+general P5.1/P5.4 acceptance. The fresh official source had zero restarts.
+The three 60-second priority rounds rejected Media traffic explicitly; their
+request totals are not successful business throughput. BMKG successful-response
+p95 was 103.64 / 94.43 / 97.82 ms. Unexpected-error rates were 0.0639 / 0.0847 /
+0.4819 percent, including the startup Media authentication failures in the
+error accounting. None of these rounds lost a Field request.
+
+A subsequent **120-second combined load/trace run failed**, even though all
+three sampled traces contained Client API, gateway and Aggregator. One of
+1,200 Field requests returned HTTP 503 (`p5-1-FIELD-94-56`, 27.665 ms); the zero
+Field-error threshold was not relaxed. Private evidence is
+`05-observability/20261121T221755Z-afb14300`. The original failed request's
+server logs had rotated before retrieval. Historical Prometheus counters in
+the same minute show a DNS discovery failure and a `gateway_no_backend_total`
+increase on B, with zero probe failures, upstream errors or read failovers.
+This supports a routing/discovery failure rather than a measured backend
+failure, but is not an exact per-request trace. Diagnostic evidence:
+`diagnose-503/20261121T222628Z-e661dd53`. Three repeat 120-second runs before
+the gateway fix passed, each with 1,201 Field requests and all three sampled
+cross-service traces; that intermittent success does not erase the earlier
+failure. Repetition now captures the Field request path live, and failure
+diagnostics include the response error without credentials.
+
+A deterministic service-local regression reproduced HTTP 503 when the last
+successful DNS answer was four seconds old despite a newly successful backend
+probe. Discovery and probe validity had shared an overly short three-second
+budget. Gateway `m2-p5-discovery-grace-20261122-r1` separates their lifetimes:
+known endpoint identity expires after 30 seconds without successful discovery,
+but routing still requires a successful probe within three seconds. Failed
+probes withdraw eligibility immediately; authoritative empty DNS results remove
+endpoints immediately. A DNS failure never renews the 30-second lifetime.
+No retry of application responses or writes was added. Unroutable decisions
+now retain correlation ID, HTTP status and reason in logs.
+
+Both new failure regressions failed on the earlier code and pass after the
+change; expired probe, expired discovery and authoritative-removal cases also
+pass. Gateway tests ran three times; all Aggregator Go tests/vet pass. The
+scoped two-gateway rollout retained the other protected pods and all original
+PVC identities: `.e2e/gateway-discovery-rollout-20261121T223009Z/`.
+
+After that rollout, all three combined load/trace campaigns passed their
+unchanged thresholds. Media received 740,959 / 693,661 / 741,141 explicit HTTP
+429 responses; unexpected-error rates were 0.0442 / 0.0410 / 0.0289 percent.
+These are not counts of successful business requests. Live Field-path logs
+were captured before rotation; they contain 1,201 / 1,196 / 1,196 Client API
+HTTP 200 completions versus k6's 1,201 in each round. The two shorter captures
+each contain only 15 of the 20 first-iteration completions: the log subscription
+had started too late, not a measured business failure. The runner now waits for
+every selected pod stream to deliver its initial tail record before k6 starts,
+discards those old tail records, and drains for two seconds after k6 finishes.
+Full durable log retention is not claimed.
+
+Post-run counters on both current gateways were zero for discovery failures,
+probe failures, upstream errors and no-ready-backend rejections. Thus live
+campaigns verify workload behavior, while the deterministic local regression
+is the evidence for routing through a transient DNS failure; a real DNS outage
+was not injected into the production cluster. The read-only gateway-checkpoint snapshot is
+`post-discovery-snapshot/20261121T223731Z-149f13cc`. It confirms unchanged Sensor
+Pantai pod identity (still OOMKilled/CrashLoopBackOff, 105 restarts), three Ready
+Aggregators, two Ready gateways, Ready notifier/Kafka/coordinator, and the
+original official Tester Agent DaemonSet with three Ready replicas. An earlier
+snapshot check incorrectly compared that DaemonSet UID to pod UIDs; its failure
+is retained separately, and the corrected check compares the same resource type.
+
+### Later Auth burst failure and fix
+
+A further cold-start priority round **failed** after the three successful
+combined runs: 14/600 Field iterations were rejected while acquiring a token,
+before any business request reached the gateway. All 586 issued Field business
+requests returned HTTP 200. The failure remains in
+`02-load/20261121T223805Z-79190a34`; its 1.296 percent unexpected-error rate also
+crossed the unchanged one-percent threshold. The existing Field reserve was
+enabled (32 active slots, default reserve eight), and runtime/test credentials
+matched; no credential values were printed during that comparison.
+
+The reserve protected Field from Media-only occupancy, but immediate rejection
+still dropped a legitimate Field burst when the shared active budget was full.
+A deterministic burst regression failed with HTTP 429 on the prior limiter.
+The limiter now retains the same active budget and regular-traffic ceiling,
+but valid Field token issuance/refresh can wait **at most one second** in a
+waiting room capped at the configured active-budget size (32 on this VPS).
+Only Field callers wait; regular traffic still sheds immediately. Semaphore
+handoff admits queued Field work as active requests finish. Context cancellation
+and a full waiting room release/reject promptly rather than accumulating work.
+Client ID, constant-time secret check, method/path, database authentication,
+client enablement, scopes and refresh-token rotation remain authoritative;
+spoofed priority headers cannot access this queue.
+
+Burst, spoofing, active-budget and waiter/cancellation regressions pass, as do
+all Auth Go tests/vet. Auth was rolled independently, retaining original PVCs
+and other workloads (`.e2e/auth-update-20261121T224526Z/`). A first build failed
+on a Docker Hub TLS handshake before any rollout; retry built the unchanged
+candidate successfully. Later load evidence must be evaluated separately from
+the preceding intermittent successes.
+
+The first post-queue three-round campaign passed without lowering load or
+thresholds: 601 Field requests per round, zero Field failures/dropped iterations,
+and all 60 token issuances plus five refreshes returned HTTP 200 (maximum
+observed Field Auth response 503.396 ms). BMKG successful-read p95 was
+119.848 / 178.907 / 120.334 ms. Media received 335,040 / 344,801 / 327,873
+controlled HTTP 429 responses; unexpected-error rates, still counting failed
+Media authentication attempts, were 0.0757 / 0.0523 / 0.1204 percent.
+
+The subsequent combined 120-second run also passed: 1,200 Field business reads,
+42 successful Field issuance/refresh attempts, three complete sampled
+Client API/gateway/Aggregator correlations, no Field errors or dropped
+iterations, and BMKG successful-read p95 141.396 ms. Media received 680,950
+controlled HTTP 429 responses; unexpected-error rate was 0.0355 percent.
+The final 60-second stream-readiness check passed with 601 Field business reads
+and 40 successful Field token attempts (20 issuance, 20 refresh). Its live
+server log counts match both exactly after the subscription-handshake fix;
+BMKG successful-read p95 was 107.551 ms, Media 429 count 344,657 and
+unexpected-error rate 0.0675 percent.
+
+Across these five post-Auth-queue load rounds, **3,604** Field business requests
+and **147** Field token attempts succeeded, with zero Field failures or dropped
+iterations. This is bounded repeated workload evidence, not a guarantee for
+unlimited Field traffic or proof of full P5. Fresh official-source coverage,
+automatic recovery of the old production source, production redundant-notifier
+cutover and Kafka/coordinator/node-loss combined-fault acceptance remain open.
+The final read-only pod snapshot is `.e2e/p5-closeout-20261121T225407Z/`;
+Auth, both gateways and notifier are Ready without restarts, while the unchanged
+production sensor remains in CrashLoopBackOff after OOM (108 restarts).
+
+Observability image `p2-obs-20261121T221605Z` prioritizes ingress log retrieval
+before slower downstream tails, fixing a reproducible trace-eviction race.
+Both service-local Python regressions pass, and the ingress-race regression
+fails on the old implementation. Prometheus retained its pod/history during
+the rollout (`.e2e/p2-obs-20261121T221605Z/`). Correlation lookup remains an
+explicitly bounded log search, not durable full-span retention. Combined-fault
+recovery and production redundancy also remain open until measured.
+
+## Latest Tester Agent / polling update
+
+At that checkpoint P5/HA work was paused. Official Agent discovery and three `kill-leader` practice
+rounds passed, but those faults hit a standby Aggregator on C while BMKG/PVMBG
+polling belonged to A. They did not prove polling takeover.
+
+The supplemental targeted-owner campaign found a real precision bug: warning
+fingerprints changed when a parent timestamp was read back from PostgreSQL at
+microsecond precision. A real PostgreSQL regression failed for both single and
+batch admission before normalization and passed afterward, including a check
+that genuine microsecond-level changes still create a new version.
+An earlier counting-oracle failure was separate: mock IDs had been reused on
+earlier days, so lifetime historical versions were not duplicate admissions in
+the current test window. Both failures remain in private evidence.
+
+Three final targeted-owner crash rounds passed after the fix and a bounded
+gateway connection-establishment failover: completed polling resumed under a
+new fencing epoch in **3.44–7.12 seconds**, all **13** independently enumerated
+window events appeared in complete canonical audit pages, current-window
+admissions were unique, and upstream request logs reconciled with poll IDs and
+cadence without multiplied requests. All **18** sampled Field reads returned
+200 (maximum **0.133 seconds**). Two actual `gateway_read_failover` log entries
+showed a refused dead-pod connection retried on a different healthy backend.
+The earlier campaign's one `backend_unavailable` 503 is retained, not counted as
+controlled overload or erased. Writes, application 503/429 responses and partial
+response bodies are not replayed by this fix.
+
+Runtime: Aggregator `m2-p2-precision-20261122-r1` (three Ready replicas), gateway
+`m2-p2-read-failover-20261122-r2` (two replicas). These were built from staged
+main-baseline sources plus the scoped fixes, not the entire dirty P5 worktree.
+Data volumes, offsets and credentials were retained. Evidence:
+`.e2e/report-tests/tester-agent/02-polling-failover/20261121T211937Z-10813ab2/`.
+
+Official schema practice exposed missing mock Service discovery, a 401 on
+the authenticated data/admin listener, and the unsupported `version` request
+field. After adding a separate platform-restricted control listener and an
+idempotent schema-version API, **three official schema practice rounds passed**:
+the Agent received 200, new additive-schema inbox messages reached `done`, and
+PVMBG/Aggregator pods did not restart. Missing Bearer and BMKG credentials still
+returned 401 on the data port. A normal application pod could reach the data
+port but not the control port; positive controls confirmed that the latter was
+live. Node/cluster administrators retain their inherent privileges. The Agent
+manifest/image were unchanged. Runtime PVMBG is
+`m2-agent-admin-20261122-r3`; evidence is
+`.e2e/report-tests/tester-agent/03-schema/20261121T212655Z-be33e6b2/`.
+This is not an overall P3 pass. `kill-store`, `clock-skew`, `partition`, `wipe-node`, freeze,
+10k-VU sustained/scaling and throughput acceptance were not newly verified by
+this campaign. No overall P2/P5 pass is claimed. Reproduce with the numbered
+cases in [`test/tester-agent/`](../../test/tester-agent/).
+
+## Previous P5 update (before critical-lane rollout)
+
+See [P5 resilience verification](../changelog/P5-resilience-verification.md).
+Notifier statistics/probes, source-filtered database indexing and Field Auth
+admission were fixed and deployed without deleting original data or increasing
+memory limits. Repeated health, practice isolation, final priority and component
+crash/dedup checks pass. **Overall P5 is not passed:** genuine Sensor Pantai still
+OOMs, source-to-notifier latency has no new official-source samples, singleton
+crash latency is around 37 seconds, general-topic consumer backlog remains, and
+correlation-log retention failed under overload. Quiet dashboard checks do not
+erase that failure. Encrypted exam resources remain deferred.
+
 ## Source versus runtime
 
 - Integration base: merge `5bafd81` (main `aa87526` plus `feat/wildfire`).

@@ -121,7 +121,35 @@ full load test. Do not expose internal NodePorts publicly to work around this.
 
 ## Scoped application updates
 
+For official Tester Agent admin calls, build a PVMBG candidate with
+`update-service.py --service pvmbg --tag TAG --build-only`, then run
+`python3 infra/vps/enable-tester-admin.py --image-tag TAG --apply`.
+Without `--apply` the second command only prints its plan. It installs the
+admin-port NetworkPolicy before enabling the `:8089` control listener and
+advertises `pvmbg-admin` to the Agent. Normal `pvmbg:8082` still requires its
+Bearer token. The official Agent manifest/image are not changed.
+
+`update-service.py --source-dir PATH` can build an explicitly staged service
+tree. The polling hotfix used main `c6bc838`, the already deployed source index,
+and only the timestamp-precision/read-failover fixes, excluding paused P5/HA
+worktree changes. Candidate tags identify build artifacts, not Git commits.
+
 These deployment entry points remain in infrastructure tooling:
+
+- `update-service.py --service notifier-consumer --tag UNIQUE`: builds/imports only notifier and performs
+  a scoped StatefulSet update. Existing notification/dedup rows, Kafka offsets,
+  credentials and PVCs are retained. The first upgraded start backfills exact
+  incremental statistics in restartable batches before consumption/HTTP starts;
+  later starts read only the persisted summary. It is a maintenance upgrade,
+  not evidence of zero-downtime notification delivery. `--build-only` stages the
+  candidate without changing the workload.
+  `--service auth` selects only Auth instead, without resetting clients or sessions.
+- `prepare-source-index.py`: plan by default; `--apply` concurrently creates the
+  source-filtered pagination index on each canonical unit. Run it before the
+  corresponding Aggregator rollout on populated databases. It preserves rows,
+  memory limits and query timeouts. Fresh schemas create the index normally;
+  existing schema fast-path startup deliberately does not build it under the
+  short readiness/query budget.
 
 - `deploy-p2-capacity.py`: scoped read-path/gateway rollout with retained resume
   state and selector/image rollback safeguards.

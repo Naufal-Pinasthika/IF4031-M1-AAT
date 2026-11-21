@@ -19,10 +19,31 @@ import (
 	"time"
 )
 
+const discoveryMaxAge = 30 * time.Second
+const probeMaxAge = 3 * time.Second
+
+// Endpoint identity may outlive one failed DNS lookup, but routing still
+// requires a recent successful readiness probe. Failed probes clear it at once.
+type backendHealth struct{ checked atomic.Pointer[time.Time] }
+
+func (h *backendHealth) Store(healthy bool) {
+	if !healthy {
+		h.checked.Store(nil)
+		return
+	}
+	now := time.Now()
+	h.checked.Store(&now)
+}
+
+func (h *backendHealth) Load() bool {
+	checked := h.checked.Load()
+	return checked != nil && time.Since(*checked) <= probeMaxAge
+}
+
 type backend struct {
 	host                   string
 	active                 atomic.Int64
-	healthy                atomic.Bool
+	healthy                backendHealth
 	proxy                  *httputil.ReverseProxy
 	regular, field         chan struct{}
 	waitRegular, waitField chan struct{}
@@ -40,6 +61,7 @@ type Gateway struct {
 	regularSlots                              chan struct{}
 	apiKey                                    string
 	requests, rejected                        atomic.Uint64
+	readFailovers                             atomic.Uint64
 	durationNanos, upstreamErrors             atomic.Uint64
 	discoveryErrors, probeFailures, noBackend atomic.Uint64
 	discovered                                time.Time
@@ -56,6 +78,7 @@ func New(logger *slog.Logger, keys ...string) *Gateway {
 	transport.MaxConnsPerHost = 256
 	transport.DisableCompression = true // preserve upstream negotiated wire bytes
 	transport.ResponseHeaderTimeout = 5 * time.Second
+	transport.DialContext = (&net.Dialer{Timeout: 250 * time.Millisecond, KeepAlive: 30 * time.Second}).DialContext
 	probeTransport := transport.Clone()
 	probeTransport.MaxConnsPerHost = 2
 	probeTransport.MaxIdleConnsPerHost = 2
@@ -100,6 +123,42 @@ type upstreamBudget struct {
 }
 
 func (t upstreamBudget) RoundTrip(r *http.Request) (*http.Response, error) {
+	response, err := t.roundTrip(r)
+	var network *net.OpError
+	if err == nil || r.Context().Err() != nil ||
+		(r.Method != http.MethodGet && r.Method != http.MethodHead) ||
+		(r.Body != nil && r.Body != http.NoBody) ||
+		!errors.As(err, &network) || network.Op != "dial" {
+		return response, err
+	}
+	// Only connection establishment failed: no HTTP bytes were sent. Never
+	// replay writes, application responses, queue rejections or partial bodies.
+	t.backend.healthy.Store(false)
+	priority := t.gateway.fieldRequest(r)
+	next := t.gateway.pickClassAvoid(&priority, t.backend)
+	if next == nil {
+		return nil, err
+	}
+	retry := r.Clone(r.Context())
+	retry.URL.Host = next.host
+	t.gateway.readFailovers.Add(1)
+	t.gateway.logger.Warn("gateway_read_failover", "correlation_id", r.Header.Get("X-Correlation-ID"),
+		"failed_backend", t.backend.host, "retry_backend", next.host, "error", err)
+	response, err = (upstreamBudget{t.gateway, next}).roundTrip(retry)
+	if err != nil {
+		next.active.Add(-1)
+		if r.Context().Err() == nil && errors.As(err, &network) && network.Op == "dial" {
+			next.healthy.Store(false)
+		}
+		return nil, err
+	}
+	// Keep least-active accounting until the response body is consumed, not
+	// merely until headers arrive. The per-backend body budget remains intact.
+	response.Body = &budgetBody{ReadCloser: response.Body, release: func() { next.active.Add(-1) }}
+	return response, nil
+}
+
+func (t upstreamBudget) roundTrip(r *http.Request) (*http.Response, error) {
 	slots := t.backend.regular
 	waiters := t.backend.waitRegular
 	m := &t.gateway.classes[0]
@@ -253,16 +312,20 @@ func (g *Gateway) pick() *backend {
 // A full ordinary queue must not divert Field traffic or attract more ordinary
 // work while another healthy endpoint has class-specific capacity available.
 func (g *Gateway) pickClass(field *bool) *backend {
+	return g.pickClassAvoid(field, nil)
+}
+
+func (g *Gateway) pickClassAvoid(field *bool, avoid *backend) *backend {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	if time.Since(g.discovered) > 3*time.Second {
+	if time.Since(g.discovered) > discoveryMaxAge {
 		return nil
 	}
 	// Random tie-breaking avoids keeping all idle traffic on the first pod.
 	var chosen *backend
 	ties := 0
 	for _, b := range g.nodes {
-		if !b.healthy.Load() {
+		if b == avoid || !b.healthy.Load() {
 			continue
 		}
 		load := func(node *backend) float64 {
@@ -370,6 +433,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if b == nil {
 		g.rejected.Add(1)
 		g.noBackend.Add(1)
+		g.logger.Warn("gateway_request", "correlation_id", r.Header.Get("X-Correlation-ID"),
+			"status", http.StatusServiceUnavailable, "error", "no_ready_backend")
 		failure(w, 503, "no_ready_backend")
 		return
 	}

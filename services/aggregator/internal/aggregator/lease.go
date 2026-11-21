@@ -62,6 +62,13 @@ func sourceHTTPClient(timeout time.Duration) *http.Client {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
+func (a *Aggregator) sourceLeaseTTL(source string) time.Duration {
+	if source == "SENSOR_PANTAI" && a.config.CoastalLeaseTTL > 0 {
+		return a.config.CoastalLeaseTTL
+	}
+	return a.config.LeaseTTL
+}
+
 func (a *Aggregator) leaseContext(ctx context.Context, source string, token int64) (context.Context, func()) {
 	cycle, cancel := context.WithCancelCause(ctx)
 	guard := requestGuard(func(requestCtx context.Context) error {
@@ -71,14 +78,14 @@ func (a *Aggregator) leaseContext(ctx context.Context, source string, token int6
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		ticker := time.NewTicker(a.config.LeaseTTL / 3)
+		ticker := time.NewTicker(a.sourceLeaseTTL(source) / 3)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-cycle.Done():
 				return
 			case <-ticker.C:
-				if err := a.coordinator.RenewLease(cycle, source, a.config.InstanceID, token, a.config.LeaseTTL); err != nil {
+				if err := a.coordinator.RenewLease(cycle, source, a.config.InstanceID, token, a.sourceLeaseTTL(source)); err != nil {
 					metric.Default.Leader(source, false)
 					a.logger.Warn("source_lease_lost", "source", source, "holder_id", a.config.InstanceID, "fencing_token", token, "error", err)
 					cancel(err)
@@ -107,7 +114,7 @@ func (a *Aggregator) runSource(ctx context.Context, source string, interval time
 	}()
 	for ctx.Err() == nil {
 		delay := interval
-		lease, leader, err := a.coordinator.AcquireOrRenewLease(ctx, source, a.config.InstanceID, a.config.LeaseTTL)
+		lease, leader, err := a.coordinator.AcquireOrRenewLease(ctx, source, a.config.InstanceID, a.sourceLeaseTTL(source))
 		metric.Default.Leader(source, leader && err == nil)
 		if err != nil {
 			a.recordPollFailure(source, err)
@@ -129,6 +136,19 @@ func (a *Aggregator) runSource(ctx context.Context, source string, interval time
 			} else if pollErr != nil && ctx.Err() == nil {
 				metric.Default.Leader(source, false)
 				a.recordPollFailure(source, pollErr)
+				if source == "SENSOR_PANTAI" && a.coastal.CircuitState() == "open" {
+					// Keep the persisted retry deadline, but do not pin a source
+					// indefinitely to an owner with a broken network path. The
+					// old owner yields locally; other replicas still pass BeginPoll.
+					release, cancel := context.WithTimeout(ctx, a.config.CoordinationTimeout)
+					err := a.coordinator.ReleaseLease(release, source, a.config.InstanceID, lease.Token)
+					cancel()
+					if err == nil {
+						ownedToken = 0
+						delay = max(delay, a.sourceLeaseTTL(source))
+						a.logger.Warn("coastal_owner_yielded", "source", source, "holder_id", a.config.InstanceID, "fencing_token", lease.Token, "retry_in_ms", delay.Milliseconds())
+					}
+				}
 			}
 		}
 		timer := time.NewTimer(delay)
@@ -195,6 +215,9 @@ func (a *Aggregator) pollCycle(ctx context.Context, source string, interval time
 func (a *Aggregator) RunDeliveries(ctx context.Context) {
 	var workers sync.WaitGroup
 	targets := []string{"broker", "canonical"} // canonical drains pending pre-v3 intents
+	if a.criticalPublisher != nil {
+		targets = append(targets, "broker:critical")
+	}
 	for _, unit := range a.config.StorageUnits {
 		targets = append(targets, "canonical:"+unit.Name)
 	}
@@ -235,6 +258,8 @@ func (a *Aggregator) deliverAccepted(ctx context.Context, item store.AcceptedEve
 	switch item.Target {
 	case "broker":
 		return a.publish(ctx, item.Event, item.CorrelationID, item.Version)
+	case "broker:critical":
+		return a.publishWith(ctx, item.Event, item.CorrelationID, item.Version, a.criticalPublisher)
 	case "canonical":
 		return a.store.UpsertAccepted(ctx, &canonical, item.Version)
 	default:

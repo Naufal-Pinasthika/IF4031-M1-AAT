@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/pvmbg/internal/telemetry"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -35,6 +36,7 @@ func requiredDurationMS(name string) (time.Duration, error) {
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "pvmbg")
+	slog.SetDefault(logger)
 	pvmbgToken := os.Getenv("PVMBG_TOKEN")
 	if pvmbgToken == "" {
 		logger.Error("configuration_invalid", "error", "PVMBG_TOKEN is not configured")
@@ -70,6 +72,21 @@ func main() {
 
 	// init state
 	serviceState := state.NewServiceState()
+	if address := os.Getenv("PVMBG_ADMIN_LISTEN_ADDRESS"); address != "" {
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			logger.Error("admin_listener_failed", "error", err)
+			os.Exit(1)
+		}
+		admin := &http.Server{Handler: telemetry.Wrap(newAdminRouter(serviceState), false),
+			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second}
+		go func() {
+			logger.Info("admin_listener_started", "address", address)
+			if err := admin.Serve(listener); err != nil && err != http.ErrServerClosed {
+				logger.Error("admin_listener_stopped", "error", err)
+			}
+		}()
+	}
 
 	volcanicHandler := &handler.VolcanicHandler{State: serviceState}
 	adminHandler := &handler.AdminHandler{State: serviceState}

@@ -52,15 +52,21 @@ type EventPublisher interface {
 }
 
 type Aggregator struct {
-	poller      *Poller
-	satellite   *SatelliteConsumer
-	store       EventStore
-	publisher   EventPublisher
-	config      config.Config
-	logger      *slog.Logger
-	status      *status.Tracker
-	coordinator SourceCoordinator
-	coastal     *CoastalClient
+	poller            *Poller
+	satellite         *SatelliteConsumer
+	store             EventStore
+	publisher         EventPublisher
+	criticalPublisher EventPublisher
+	config            config.Config
+	logger            *slog.Logger
+	status            *status.Tracker
+	coordinator       SourceCoordinator
+	coastal           *CoastalClient
+}
+
+// SetCriticalPublisher must be called before starting delivery workers.
+func (a *Aggregator) SetCriticalPublisher(publisher EventPublisher) {
+	a.criticalPublisher = publisher
 }
 
 type volcanoReference struct {
@@ -320,7 +326,10 @@ func (a *Aggregator) runCoastal(ctx context.Context) {
 				if errors.Is(progressErr, store.ErrSourceClockStale) || errors.Is(progressErr, store.ErrSourceClockRegression) {
 					return &CoastalProtocolError{Reason: progressErr.Error(), Retryable: true}
 				}
-				return progressErr
+				if progressErr != nil {
+					return &CoastalDependencyError{Err: progressErr}
+				}
+				return nil
 			})
 		}
 		err = a.handleCoastalPage(cycle, page, err, correlationID, token)
@@ -410,7 +419,11 @@ func (a *Aggregator) recordPollFailure(source string, err error) {
 }
 
 func (a *Aggregator) publish(ctx context.Context, event model.HazardEvent, correlationID string, version int64) error {
-	if a.publisher == nil {
+	return a.publishWith(ctx, event, correlationID, version, a.publisher)
+}
+
+func (a *Aggregator) publishWith(ctx context.Context, event model.HazardEvent, correlationID string, version int64, publisher EventPublisher) error {
+	if publisher == nil {
 		return fmt.Errorf("event publisher is not configured")
 	}
 
@@ -426,7 +439,7 @@ func (a *Aggregator) publish(ctx context.Context, event model.HazardEvent, corre
 		envelope.EventType = "hazard.event.deleted"
 	}
 	startedAt := time.Now()
-	err := a.publisher.Publish(ctx, envelope)
+	err := publisher.Publish(ctx, envelope)
 	latency := time.Since(startedAt).Milliseconds()
 	if err != nil {
 		a.logger.Error("hazard_event_publish_failed", "hazard_id", event.HazardID, "correlation_id", correlationID, "latency_ms", latency, "error", err)

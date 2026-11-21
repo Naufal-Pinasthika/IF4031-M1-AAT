@@ -113,7 +113,7 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create notifier data directory: %w", err)
 	}
-	db, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: time.Second})
+	db, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: time.Second, InitialMmapSize: 1 << 30})
 	if err != nil {
 		return nil, fmt.Errorf("open notifier store: %w", err)
 	}
@@ -129,6 +129,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("initialize notifier store: %w", err)
 	}
+	if err := result.initializeStats(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("initialize notifier statistics: %w", err)
+	}
 	return result, nil
 }
 
@@ -140,31 +144,7 @@ func (s *Store) Deliver(messageID string, envelope event.Envelope) (bool, error)
 		return false, nil
 	}
 	createdAt := time.Now().UTC()
-	var sourceLatency *int64
-	if envelope.Data.Source != "SENSOR_PANTAI" {
-		elapsed := nonNegativeMilliseconds(createdAt.Sub(envelope.Data.OccurredAt))
-		sourceLatency = &elapsed
-	}
-	var ingressLatency int64
-	if !envelope.Data.IngestedAt.IsZero() {
-		ingressLatency = nonNegativeMilliseconds(createdAt.Sub(envelope.Data.IngestedAt))
-	}
-	critical, _ := envelope.Data.Attributes["critical"].(bool)
-	notification := Notification{
-		MessageID:         messageID,
-		HazardID:          envelope.Data.HazardID,
-		Source:            envelope.Data.Source,
-		HazardType:        envelope.Data.HazardType,
-		Severity:          envelope.Data.Severity,
-		AreaName:          envelope.Data.AreaName,
-		Message:           fmt.Sprintf("%s: %s at %s", envelope.Data.Severity, envelope.Data.HazardType, envelope.Data.AreaName),
-		CorrelationID:     envelope.CorrelationID,
-		CreatedAt:         createdAt,
-		PipelineLatencyMS: nonNegativeMilliseconds(createdAt.Sub(envelope.PublishedAt)),
-		SourceLatencyMS:   sourceLatency,
-		IngressLatencyMS:  ingressLatency,
-		Critical:          critical,
-	}
+	notification := notificationFor(messageID, envelope, createdAt)
 	payload, err := json.Marshal(notification)
 	if err != nil {
 		return false, fmt.Errorf("encode notification: %w", err)
@@ -192,9 +172,47 @@ func (s *Store) Deliver(messageID string, envelope event.Envelope) (bool, error)
 		if err := metadata.Put(processedKey, encodeCount(count)); err != nil {
 			return err
 		}
-		return nil
+		state, err := readStats(tx)
+		if err != nil {
+			return err
+		}
+		state.ProcessedCount = int(count)
+		if delivered {
+			if err := state.add(tx, notification); err != nil {
+				return err
+			}
+		}
+		return state.save(tx)
 	})
 	return delivered, err
+}
+
+func notificationFor(messageID string, envelope event.Envelope, createdAt time.Time) Notification {
+	var sourceLatency *int64
+	if envelope.Data.Source != "SENSOR_PANTAI" {
+		elapsed := nonNegativeMilliseconds(createdAt.Sub(envelope.Data.OccurredAt))
+		sourceLatency = &elapsed
+	}
+	var ingressLatency int64
+	if !envelope.Data.IngestedAt.IsZero() {
+		ingressLatency = nonNegativeMilliseconds(createdAt.Sub(envelope.Data.IngestedAt))
+	}
+	critical, _ := envelope.Data.Attributes["critical"].(bool)
+	return Notification{
+		MessageID:         messageID,
+		HazardID:          envelope.Data.HazardID,
+		Source:            envelope.Data.Source,
+		HazardType:        envelope.Data.HazardType,
+		Severity:          envelope.Data.Severity,
+		AreaName:          envelope.Data.AreaName,
+		Message:           fmt.Sprintf("%s: %s at %s", envelope.Data.Severity, envelope.Data.HazardType, envelope.Data.AreaName),
+		CorrelationID:     envelope.CorrelationID,
+		CreatedAt:         createdAt,
+		PipelineLatencyMS: nonNegativeMilliseconds(createdAt.Sub(envelope.PublishedAt)),
+		SourceLatencyMS:   sourceLatency,
+		IngressLatencyMS:  ingressLatency,
+		Critical:          critical,
+	}
 }
 
 func (s *Store) Notifications() ([]Notification, error) {
@@ -215,38 +233,11 @@ func (s *Store) Notifications() ([]Notification, error) {
 
 func (s *Store) Stats() (Stats, error) {
 	var result Stats
-	var pipeline []int64
-	var source []int64
-	var coastalCritical []int64
 	err := s.db.View(func(tx *bbolt.Tx) error {
-		result.NotificationCount = tx.Bucket(notificationsBucket).Stats().KeyN
-		result.ProcessedCount = int(decodeCount(tx.Bucket(metadataBucket).Get(processedKey)))
-		pipeline = make([]int64, 0, result.NotificationCount)
-		source = make([]int64, 0, result.NotificationCount)
-		return tx.Bucket(notificationsBucket).ForEach(func(_, value []byte) error {
-			var item Notification
-			if err := json.Unmarshal(value, &item); err != nil {
-				return err
-			}
-			pipeline = append(pipeline, item.PipelineLatencyMS)
-			if item.SourceLatencyMS != nil {
-				source = append(source, *item.SourceLatencyMS)
-			}
-			if item.Critical {
-				result.CriticalCount++
-				if item.Source == "SENSOR_PANTAI" {
-					result.CoastalCriticalCount++
-					coastalCritical = append(coastalCritical, item.IngressLatencyMS)
-				}
-			}
-			return nil
-		})
+		state, err := readStats(tx)
+		result = state.Stats
+		return err
 	})
-	if err == nil {
-		result.P95PipelineLatencyMS = percentile95(pipeline)
-		result.P95SourceLatencyMS = percentile95(source)
-		result.P95CoastalCriticalIngressMS = percentile95(coastalCritical)
-	}
 	return result, err
 }
 
@@ -276,17 +267,4 @@ func nonNegativeMilliseconds(duration time.Duration) int64 {
 		return 0
 	}
 	return duration.Milliseconds()
-}
-
-func percentile95(values []int64) int64 {
-	if len(values) == 0 {
-		return 0
-	}
-	copyValues := append([]int64(nil), values...)
-	sort.Slice(copyValues, func(i, j int) bool { return copyValues[i] < copyValues[j] })
-	index := (95*len(copyValues)+99)/100 - 1
-	if index < 0 {
-		index = 0
-	}
-	return copyValues[index]
 }

@@ -67,6 +67,12 @@ class Sandbox:
     def configure(self, config):
         pass
 
+    def configure_credentials(self, values):
+        pass
+
+    def source_script(self):
+        return (Path(__file__).parent / 'source.py').read_text()
+
     def __enter__(self):
         h = self.h
         h.changes()
@@ -84,12 +90,13 @@ class Sandbox:
                 url = urllib.parse.urlsplit(values[key])
                 values[key] = urllib.parse.urlunsplit(url._replace(path='/' + self.database))
             values.update(SATELLITE_TOKEN=self.token if self.satellite else '', PVMBG_TOKEN=self.token, PANTAI_AUTH_TOKEN='')
+            self.configure_credentials(values)
             source_url = 'http://' + self.name + '-source.' + NS + '.svc.cluster.local:8080'
             config.update(PVMBG_URL=source_url, BMKG_URL=source_url, SATELLITE_URL=source_url,
                           AGGREGATOR_POLL_INTERVAL_MS='100', PVMBG_ADAPTER_VERSION='1',
                           AGGREGATOR_START_SINCE='1970-01-01T00:00:00Z', AGGREGATOR_READ_CACHE_TTL_MS='0',
                           AGGREGATOR_SHARED_READ_PROJECTION='false', P1_IMPORT_ONLY='false',
-                          KAFKA_TOPIC=self.name, KAFKA_BROKERS='kafka:9092')
+                          KAFKA_TOPIC=self.name, KAFKA_CRITICAL_TOPIC='', KAFKA_BROKERS='kafka:9092')
             self.configure(config)
             h.kube('exec', 'kafka-0', '--', '/opt/kafka/bin/kafka-topics.sh', '--bootstrap-server', 'localhost:9092',
                    '--create', '--topic', self.name, '--partitions', '3', '--replication-factor', '1')
@@ -98,7 +105,7 @@ class Sandbox:
             image = lambda app: next(d['spec']['template']['spec']['containers'][0]['image'] for d in deployments if d['metadata']['name'] == app)
             config_obj = self.resource('ConfigMap', self.name, data=config)
             secret_obj = self.resource('Secret', self.name, stringData={**values, 'SOURCE_TOKEN': self.token})
-            script = self.resource('ConfigMap', self.name + '-source', data={'server.py': (Path(__file__).parent / 'source.py').read_text()})
+            script = self.resource('ConfigMap', self.name + '-source', data={'server.py': self.source_script()})
             source, source_svc = self.deployment(self.name + '-source', 'mock', image('observability'), 8080,
                 [{'name': 'SOURCE_TOKEN', 'valueFrom': {'secretKeyRef': {'name': self.name, 'key': 'SOURCE_TOKEN'}}}],
                 command=['python3', '-u', '/fixture/server.py'], volumeMounts=[{'name': 'script', 'mountPath': '/fixture', 'readOnly': True}])

@@ -561,6 +561,8 @@ func (s *Store) ensureSchema(ctx context.Context, u *unit) error {
  ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS fencing_token BIGINT NOT NULL DEFAULT 0;
  ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS ingestion_version BIGINT NOT NULL DEFAULT 0;
  CREATE INDEX IF NOT EXISTS p1_occurred ON hazard_events(partition_id,occurred_at,hazard_id);
+ CREATE INDEX IF NOT EXISTS p1_source_occurred ON hazard_events(partition_id,source,occurred_at,hazard_id)
+ WHERE COALESCE(attributes->>'_retracted','false')<>'true';
  CREATE INDEX IF NOT EXISTS p1_ingested ON hazard_events(partition_id,ingested_at,hazard_id);
  CREATE INDEX IF NOT EXISTS p1_analytics_live ON hazard_events(partition_id,hazard_id)
  INCLUDE(ingestion_version,revision,hazard_type,severity,area_name,occurred_at)

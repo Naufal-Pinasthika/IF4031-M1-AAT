@@ -17,11 +17,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/store"
 )
 
 const coastalResponseLimit = 4 << 20
 
-var ErrCircuitOpen = errors.New("coastal circuit is open")
+var ErrCircuitOpen = store.ErrSourcePaused
 
 type CoastalStation struct {
 	StationID string  `json:"station_id"`
@@ -62,6 +63,11 @@ type CoastalProtocolError struct {
 
 func (e *CoastalProtocolError) Error() string { return e.Reason }
 
+type CoastalDependencyError struct{ Err error }
+
+func (e *CoastalDependencyError) Error() string { return e.Err.Error() }
+func (e *CoastalDependencyError) Unwrap() error { return e.Err }
+
 type CoastalClient struct {
 	client   *http.Client
 	logger   *slog.Logger
@@ -95,6 +101,14 @@ func (c *CoastalClient) FetchPage(ctx context.Context, baseURL, token, cursor, c
 	page, err := c.fetchObservations(ctx, baseURL, token, cursor, correlationID)
 	if err == nil && checkProgress != nil {
 		err = checkProgress(ctx, page.GeneratedAt)
+		var dependencyErr *CoastalDependencyError
+		if errors.As(err, &dependencyErr) {
+			c.circuit.Abandon(time.Now())
+			return page, err
+		}
+		if errors.Is(err, store.ErrSourceClockStale) || errors.Is(err, store.ErrSourceClockRegression) {
+			err = &CoastalProtocolError{Reason: err.Error(), Retryable: true}
+		}
 		var protocolErr *CoastalProtocolError
 		if errors.As(err, &protocolErr) {
 			protocolErr.Payload = page.Payload
@@ -199,7 +213,7 @@ func (c *CoastalClient) fetchObservations(ctx context.Context, baseURL, token, c
 	return page, nil
 }
 
-func (c *CoastalClient) get(ctx context.Context, endpoint, token, correlationID, operation string) ([]byte, error) {
+func (c *CoastalClient) get(ctx context.Context, endpoint, token, correlationID, operation string) (payload []byte, err error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -207,14 +221,23 @@ func (c *CoastalClient) get(ctx context.Context, endpoint, token, correlationID,
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("X-Correlation-ID", correlationID)
 	started := time.Now()
+	status := 0
+	defer func() {
+		fields := []any{"operation", operation, "status", status, "correlation_id", correlationID, "latency_ms", time.Since(started).Milliseconds()}
+		if err != nil {
+			c.logger.Warn("coastal_request_failed", append(fields, "error", err)...)
+		} else {
+			c.logger.Info("coastal_request_completed", fields...)
+		}
+	}()
 	response, err := c.client.Do(request)
 	if err != nil {
-		c.logger.Warn("coastal_request_failed", "operation", operation, "correlation_id", correlationID, "latency_ms", time.Since(started).Milliseconds(), "error", err)
 		return nil, err
 	}
+	status = response.StatusCode
 	defer response.Body.Close()
 	limited := io.LimitReader(response.Body, coastalResponseLimit+1)
-	payload, err := io.ReadAll(limited)
+	payload, err = io.ReadAll(limited)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +247,6 @@ func (c *CoastalClient) get(ctx context.Context, endpoint, token, correlationID,
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return nil, fmt.Errorf("coastal %s returned HTTP %d", operation, response.StatusCode)
 	}
-	c.logger.Info("coastal_request_completed", "operation", operation, "status", response.StatusCode, "correlation_id", correlationID, "latency_ms", time.Since(started).Milliseconds())
 	return payload, nil
 }
 
