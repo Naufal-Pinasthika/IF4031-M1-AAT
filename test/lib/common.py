@@ -54,6 +54,7 @@ class Harness:
                        'status': 'failed', 'checks': [], 'requests': [], 'observations': [],
                        'started_at': dt.datetime.now(dt.timezone.utc).isoformat()}
         self.tokens, self.values, self.tunnel = {}, {}, None
+        self.token_deadlines = {}
         self.hosts, self.server = None, None
         self.created = False
         self.extra_processes = []
@@ -197,10 +198,13 @@ class Harness:
         header = {'Authorization': 'Basic ' + base64.b64encode(credentials.encode()).decode()}
         code, pair, _ = self.request('auth', '/v1/token', header, method='POST', private=True)
         self.check(code == 200, role + ' authentication succeeds')
+        lifetime = pair['expires_in']
+        self.check(lifetime > 0, 'Access token has a positive declared lifetime')
         self.tokens[role] = {'Authorization': 'Bearer ' + pair['access_token']}
+        self.token_deadlines[role] = time.monotonic() + lifetime - min(5, lifetime / 10)
 
     def api(self, path, role='OPS', body=None, extra=None, method=None):
-        if role not in self.tokens:
+        if role not in self.tokens or time.monotonic() >= self.token_deadlines[role]:
             self.auth(role)
         method = method or ('POST' if body is not None else 'GET')
         result = self.request('client', path, {**self.tokens[role], **(extra or {})}, body, method)
