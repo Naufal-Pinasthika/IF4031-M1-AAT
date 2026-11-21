@@ -41,7 +41,7 @@ def services():
     return {'apiVersion': 'v1', 'kind': 'List', 'items': result}
 
 
-def deploy(hosts, tag, skip_build=False):
+def deploy(hosts, tag, skip_build=False, no_cache=False, build_only=False):
     server = hosts.nodes[0]
     hosts.ssh(server, 'sudo -n install -d -m 700 /opt/aat/repo /opt/aat/backups')
     ssh = shlex.join(hosts.command(server, '')[:-2])
@@ -65,9 +65,13 @@ def deploy(hosts, tag, skip_build=False):
         raise ValueError('Create .env with scripts/setup-env.sh first; existing credentials are never replaced automatically')
     hosts.write(server, '/opt/aat/repo/.env', env_path.read_text())
     if not skip_build:
-        hosts.ssh(server, f'sudo -n bash /opt/aat/repo/infra/vps/build.sh {tag}')
+        build_option = ' --no-cache' if no_cache else ''
+        hosts.ssh(server, f'sudo -n bash /opt/aat/repo/infra/vps/build.sh {tag}{build_option}')
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         list(pool.map(lambda n: import_worker(hosts, n, tag), hosts.nodes[1:]))
+    if build_only:
+        print('Images built/imported on all nodes; application workloads unchanged.', flush=True)
+        return
     hosts.ssh(server, f'sudo -n bash -c {shlex.quote("cd /opt/aat/repo && bash scripts/deploy-k8s.sh --k3s --image-tag " + tag + " --timeout 600s")}')
     hosts.ssh(server, 'sudo -n k3s kubectl apply -f -', json.dumps(services()).encode())
     hosts.ssh(server, f'sudo -n k3s kubectl apply -f {TESTER}')
@@ -81,14 +85,18 @@ def main():
     p.add_argument('--inventory', type=Path, default=ROOT / 'infra/vps/inventory.json')
     p.add_argument('--provision', action='store_true')
     p.add_argument('--skip-build', action='store_true', help='Reuse a previously built --tag')
+    p.add_argument('--no-cache', action='store_true', help='Rebuild image layers without cache and pull base images')
+    p.add_argument('--build-only', action='store_true', help='Build/import images without applying Kubernetes workloads')
     p.add_argument('--tag', default='m2-vps-' + datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d%H%M%S'))
     args = p.parse_args()
+    if args.skip_build and args.no_cache:
+        p.error('--skip-build cannot be combined with --no-cache')
     if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}', args.tag):
         raise ValueError('invalid image tag')
     hosts = Hosts(inventory(args.inventory))
     if args.provision:
         hosts.provision()
-    deploy(hosts, args.tag, args.skip_build)
+    deploy(hosts, args.tag, args.skip_build, args.no_cache, args.build_only)
 
 
 if __name__ == '__main__':

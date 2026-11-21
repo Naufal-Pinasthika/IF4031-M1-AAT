@@ -6,10 +6,19 @@ import "sync"
 // schemaV2: json schema with "confidence_level"
 
 type ServiceState struct {
-	mu sync.RWMutex // use mutex to prevent data race changing schema version / outtage
+	mu              sync.RWMutex // use mutex to prevent data race changing schema version / outtage
 	schemaV2Enabled bool
-	outageEnabled bool
+	outageEnabled   bool
+	schemaMode      string
 }
+
+func (s *ServiceState) SetSchemaMode(mode string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.schemaMode = mode
+	s.schemaV2Enabled = mode == "additive"
+}
+func (s *ServiceState) SchemaMode() string { s.mu.RLock(); defer s.mu.RUnlock(); return s.schemaMode }
 
 // constructor
 func NewServiceState() *ServiceState {
@@ -45,6 +54,10 @@ func (s *ServiceState) ToggleSchemaVersion() bool {
 
 	// return exact opposite state (hence 'toggle')
 	s.schemaV2Enabled = !s.schemaV2Enabled
+	s.schemaMode = "legacy"
+	if s.schemaV2Enabled {
+		s.schemaMode = "additive"
+	}
 	return s.schemaV2Enabled
 }
 

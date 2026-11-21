@@ -197,6 +197,13 @@ spec:
         role: aggregator
     spec:
       terminationGracePeriodSeconds: 20
+      dnsConfig:
+        options:
+        - name: use-vc
+        - name: timeout
+          value: "1"
+        - name: attempts
+          value: "2"
       affinity:
         podAntiAffinity:
           preferredDuringSchedulingIgnoredDuringExecution:
@@ -642,6 +649,13 @@ spec:
         app: notifier-consumer
         role: consumer
     spec:
+      dnsConfig:
+        options:
+        - name: use-vc
+        - name: timeout
+          value: "1"
+        - name: attempts
+          value: "2"
       # p1: keep services without HA available when a storage worker is lost.
       affinity:
         nodeAffinity:

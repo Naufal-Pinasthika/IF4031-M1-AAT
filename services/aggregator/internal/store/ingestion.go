@@ -49,14 +49,6 @@ func (c *Coordinator) AcceptEvent(ctx context.Context, source, holder string, to
 		return fmt.Errorf("invalid fenced event identity")
 	}
 	copyEvent := *event
-	copyEvent.HazardID = eventID(source, event.SourceRefID)
-	copyEvent.IngestedAt = time.Time{}
-	payload, err := json.Marshal(copyEvent)
-	if err != nil {
-		return err
-	}
-	digest := sha256.Sum256(payload)
-	fingerprint := hex.EncodeToString(digest[:])
 	op, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	tx, err := c.pool.Begin(op)
@@ -76,42 +68,58 @@ func (c *Coordinator) AcceptEvent(ctx context.Context, source, holder string, to
 	if err != nil {
 		return err
 	}
-	var previous string
-	err = tx.QueryRow(op, `SELECT fingerprint FROM ingestion_heads WHERE hazard_id=$1`, copyEvent.HazardID).Scan(&previous)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return err
-	}
-	if err == nil && previous == fingerprint {
-		if err := tx.Commit(op); err != nil {
-			return err
-		}
-		event.HazardID = copyEvent.HazardID
-		return nil
-	}
-	copyEvent.IngestedAt = acceptedAt.UTC()
-	payload, err = json.Marshal(copyEvent)
-	if err != nil {
-		return err
-	}
-	var version int64
-	err = tx.QueryRow(op, `INSERT INTO ingestion_outbox(source,holder_id,fencing_token,hazard_id,payload,correlation_id,accepted_at)
- VALUES($1,$2,$3,$4,$5::jsonb,$6,$7) RETURNING version`, source, holder, token, copyEvent.HazardID, payload, correlationID, acceptedAt).Scan(&version)
-	if err != nil {
-		return err
-	}
-	_, err = tx.Exec(op, `INSERT INTO ingestion_heads(hazard_id,fingerprint,version) VALUES($1,$2,$3)
- ON CONFLICT(hazard_id) DO UPDATE SET fingerprint=EXCLUDED.fingerprint,version=EXCLUDED.version`, copyEvent.HazardID, fingerprint, version)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(op, `INSERT INTO ingestion_projections(version,target,source,hazard_id)
- SELECT $1,unnest($2::text[]),$3,$4`, version, c.projectionTargets(copyEvent), source, copyEvent.HazardID); err != nil {
+	if err := c.admitTx(op, tx, source, holder, token, &copyEvent, correlationID, acceptedAt); err != nil {
 		return err
 	}
 	if err := tx.Commit(op); err != nil {
 		return err
 	}
 	*event = copyEvent
+	return nil
+}
+
+// Callers hold the source lease (or their inbox row) in this transaction.
+// State, checkpoint, deduplication and destination intents commit together.
+func (c *Coordinator) admitTx(op context.Context, tx pgx.Tx, source, holder string, token int64, event *model.HazardEvent, correlationID string, acceptedAt time.Time) error {
+	copyEvent := *event
+	copyEvent.HazardID = eventID(source, event.SourceRefID)
+	copyEvent.IngestedAt = time.Time{}
+	payload, err := json.Marshal(copyEvent)
+	if err != nil {
+		return err
+	}
+	digest := sha256.Sum256(payload)
+	fingerprint := hex.EncodeToString(digest[:])
+	copyEvent.IngestedAt = acceptedAt.UTC()
+	payload, err = json.Marshal(copyEvent)
+	if err != nil {
+		return err
+	}
+	var inserted int
+	// Identity serialization is held by the caller. Deduplication, the parent
+	// intent and every destination remain atomic, with one database round trip
+	// instead of four on every stream mutation.
+	err = tx.QueryRow(op, `WITH admitted AS (
+ INSERT INTO ingestion_outbox(source,holder_id,fencing_token,hazard_id,payload,correlation_id,accepted_at)
+ SELECT $1,$2,$3,$4,$5::jsonb,$6,$7
+ WHERE NOT EXISTS(SELECT 1 FROM ingestion_heads WHERE hazard_id=$4 AND fingerprint=$8)
+ RETURNING version
+ ), heads AS (
+ INSERT INTO ingestion_heads(hazard_id,fingerprint,version) SELECT $4,$8,version FROM admitted
+ ON CONFLICT(hazard_id) DO UPDATE SET fingerprint=EXCLUDED.fingerprint,version=EXCLUDED.version
+ ), projections AS (
+ INSERT INTO ingestion_projections(version,target,source,hazard_id)
+ SELECT version,unnest($9::text[]),$1,$4 FROM admitted
+ ) SELECT count(*) FROM admitted`, source, holder, token, copyEvent.HazardID, payload, correlationID,
+		acceptedAt, fingerprint, c.projectionTargets(copyEvent)).Scan(&inserted)
+	if err != nil {
+		return err
+	}
+	if inserted > 0 {
+		*event = copyEvent
+	} else {
+		event.HazardID = copyEvent.HazardID
+	}
 	return nil
 }
 
@@ -279,6 +287,12 @@ func (c *Coordinator) DeliverNext(ctx context.Context, source, target string, ap
 	// obtaining the parent lock (READ COMMITTED); concurrent final acks cannot
 	// leave a completed intent permanently retaining its payload.
 	if _, err := tx.Exec(op, `SELECT version FROM ingestion_outbox WHERE version=$1 FOR UPDATE`, item.Version); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(op, `INSERT INTO satellite_pipeline_samples(version,latency_ms)
+ SELECT o.version,EXTRACT(EPOCH FROM(clock_timestamp()-o.accepted_at))*1000 FROM ingestion_outbox o
+ WHERE o.version=$1 AND o.source='SATELIT' AND NOT EXISTS(SELECT 1 FROM ingestion_projections p WHERE p.version=o.version AND p.target LIKE 'canonical%' AND p.delivered_at IS NULL)
+ ON CONFLICT DO NOTHING`, item.Version); err != nil {
 		return false, err
 	}
 	if _, err := tx.Exec(op, `UPDATE ingestion_outbox o SET delivered_at=clock_timestamp(),payload=NULL,last_error=NULL

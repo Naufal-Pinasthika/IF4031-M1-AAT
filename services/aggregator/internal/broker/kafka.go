@@ -22,6 +22,7 @@ type EventEnvelope struct {
 
 type Publisher interface {
 	Publish(ctx context.Context, envelope EventEnvelope) error
+	PublishBatch(ctx context.Context, envelopes []EventEnvelope) error
 	Close() error
 }
 
@@ -45,7 +46,7 @@ func NewKafkaPublisher(brokers []string, topic string) (*KafkaPublisher, error) 
 			Topic:        topic,
 			Balancer:     &kafka.Hash{},
 			RequiredAcks: kafka.RequireAll,
-			BatchTimeout: 50 * time.Millisecond,
+			BatchTimeout: 5 * time.Millisecond,
 			Async:        false,
 		},
 	}, nil
@@ -70,6 +71,33 @@ func (p *KafkaPublisher) Publish(ctx context.Context, envelope EventEnvelope) er
 	})
 	if err != nil {
 		return fmt.Errorf("publish Kafka on %s: %w", envelope.Data.HazardID, err)
+	}
+	return nil
+}
+
+func (p *KafkaPublisher) PublishBatch(ctx context.Context, envelopes []EventEnvelope) error {
+	if len(envelopes) == 0 {
+		return nil
+	}
+	messages := make([]kafka.Message, 0, len(envelopes))
+	for _, envelope := range envelopes {
+		payload, err := json.Marshal(envelope)
+		if err != nil {
+			return fmt.Errorf("marshal Kafka event: %w", err)
+		}
+		messages = append(messages, kafka.Message{
+			Key:   []byte(envelope.Data.HazardID),
+			Value: payload,
+			Time:  envelope.PublishedAt,
+			Headers: []kafka.Header{
+				{Key: "event_type", Value: []byte(envelope.EventType)},
+				{Key: "schema_version", Value: []byte(fmt.Sprint(envelope.SchemaVersion))},
+				{Key: "correlation_id", Value: []byte(envelope.CorrelationID)},
+			},
+		})
+	}
+	if err := p.writer.WriteMessages(ctx, messages...); err != nil {
+		return fmt.Errorf("publish Kafka batch: %w", err)
 	}
 	return nil
 }

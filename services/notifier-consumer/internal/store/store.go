@@ -136,6 +136,9 @@ func (s *Store) Deliver(messageID string, envelope event.Envelope) (bool, error)
 	if messageID == "" {
 		return false, fmt.Errorf("message ID is required")
 	}
+	if envelope.EventType == "hazard.event.deleted" {
+		return false, nil
+	}
 	createdAt := time.Now().UTC()
 	var sourceLatency *int64
 	if envelope.Data.Source != "SENSOR_PANTAI" {

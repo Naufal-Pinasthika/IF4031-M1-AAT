@@ -15,12 +15,8 @@ type StorageUnit struct{ Name, DatabaseURL string }
 type Config struct {
 	StorageUnits         []StorageUnit
 	StoreTimeout         time.Duration
-	CoordinationURL      string
-	CoordinationTimeout  time.Duration
 	AuditToken           string
 	ImportOnly           bool
-	InstanceID           string
-	LeaseTTL             time.Duration
 	ListenAddress        string
 	DatabaseURL          string
 	KafkaBrokers         []string
@@ -29,6 +25,13 @@ type Config struct {
 	BMKGAPIKey           string
 	PVMBGURL             string
 	PVMBGToken           string
+	PVMBGAdapterVersion  int
+	SatelliteURL         string
+	SatelliteToken       string
+	CoordinationURL      string
+	CoordinationTimeout  time.Duration
+	InstanceID           string
+	LeaseTTL             time.Duration
 	CoastalURL           string
 	CoastalToken         string
 	PollingInterval      time.Duration
@@ -48,6 +51,10 @@ type Config struct {
 
 // p1
 func Load() (Config, error) {
+	adapterVersion, err := positiveIntFromEnv("PVMBG_ADAPTER_VERSION", 1)
+	if err != nil || adapterVersion > 2 {
+		return Config{}, fmt.Errorf("PVMBG_ADAPTER_VERSION must be 1 or 2")
+	}
 	pollingInterval, err := durationFromEnv("AGGREGATOR_POLL_INTERVAL_MS", 5000)
 	if err != nil {
 		return Config{}, err
@@ -175,6 +182,9 @@ func Load() (Config, error) {
 		BMKGAPIKey:           os.Getenv("BMKG_API_KEY"),
 		PVMBGURL:             envOrDefault("PVMBG_URL", "http://localhost:8082"),
 		PVMBGToken:           os.Getenv("PVMBG_TOKEN"),
+		PVMBGAdapterVersion:  adapterVersion,
+		SatelliteURL:         envOrDefault("SATELLITE_URL", "https://satellite.naufarrel.dev"),
+		SatelliteToken:       os.Getenv("SATELLITE_TOKEN"),
 		CoastalURL:           envOrDefault("COASTAL_URL", "http://sensor-pantai:8080"),
 		CoastalToken:         os.Getenv("PANTAI_AUTH_TOKEN"),
 		PollingInterval:      pollingInterval,

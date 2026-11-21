@@ -5,9 +5,8 @@ import "time"
 type HazardSource string
 
 const (
-	SourceBMKG  HazardSource = "BMKG"
-	SourcePVMBG HazardSource = "PVMBG"
-	// p1: new canonical sources.
+	SourceBMKG         HazardSource = "BMKG"
+	SourcePVMBG        HazardSource = "PVMBG"
 	SourceSATELIT      HazardSource = "SATELIT"
 	SourceSENSORPANTAI HazardSource = "SENSOR_PANTAI"
 )
@@ -17,7 +16,6 @@ type HazardType string
 const (
 	HazardTypeSEISMIC  HazardType = "SEISMIC"
 	HazardTypeVOLCANIC HazardType = "VOLCANIC"
-	// p1: five dashboard categories.
 	HazardTypeTSUNAMI  HazardType = "TSUNAMI"
 	HazardTypeWILDFIRE HazardType = "WILDFIRE"
 	HazardTypeCOASTAL  HazardType = "COASTAL"
