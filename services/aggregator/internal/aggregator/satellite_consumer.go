@@ -17,8 +17,8 @@ func NewSatelliteConsumer(baseURL, token string, logger *slog.Logger) *Satellite
 	}
 }
 
-func (c *SatelliteConsumer) Consume(ctx context.Context, handlers ...func(SatelliteStreamEvent) error) error {
-	return c.stream.Run(ctx, func(event SatelliteStreamEvent) error {
+func (c *SatelliteConsumer) Consume(ctx context.Context, fromOffset int64, handlers ...func(SatelliteStreamEvent) error) error {
+	return c.stream.Run(ctx, fromOffset, func(event SatelliteStreamEvent) error {
 		c.logger.Info(
 			"satellite_event_received",
 			"event_type", event.Type,

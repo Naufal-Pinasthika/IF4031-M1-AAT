@@ -20,12 +20,13 @@ import (
 
 // p1 writer lock serializes revisions state lock never spans network I/O
 type Store struct {
-	units    []*unit
-	timeout  time.Duration
-	logger   *slog.Logger
-	writer   sync.Mutex
-	state    sync.RWMutex
-	recovery sync.Mutex
+	units     []*unit
+	timeout   time.Duration
+	logger    *slog.Logger
+	writer    sync.Mutex
+	satellite sync.Mutex
+	state     sync.RWMutex
+	recovery  sync.Mutex
 }
 
 // p1 all mutable fields are guarded by Store.state.
@@ -74,10 +75,16 @@ func New(ctx context.Context, configs []config.StorageUnit, timeout time.Duratio
 		op, cancel := context.WithTimeout(ctx, timeout)
 		err = s.ensureSchema(op, u)
 		if err == nil {
+			err = s.ensureSatelliteSchema(op, u)
+		}
+		if err == nil {
+			err = s.ensureOutboxSchema(op, u)
+		}
+		if err == nil {
+			u.online = true
 			var status string
 			err = u.pool.QueryRow(op, "SELECT status FROM p1_metadata WHERE singleton=true").Scan(&status)
 			if err == nil {
-				u.online = true
 				u.ready = status == "ready"
 				if status == "new" {
 					fresh++
@@ -99,6 +106,10 @@ func New(ctx context.Context, configs []config.StorageUnit, timeout time.Duratio
 		s.units[0].ready = true
 	}
 	for i, u := range s.units {
+		if len(s.units) == 1 {
+			u.ready = true
+			continue
+		}
 		if u.online {
 			s.recoverUnit(ctx, i, u.ready)
 		}
@@ -216,6 +227,9 @@ func (s *Store) Upsert(ctx context.Context, event *model.HazardEvent) error {
 	if successes == 0 {
 		return fmt.Errorf("no storage destination accepted event")
 	}
+	if err := s.enqueueOutbox(ctx, outboxEnvelope(ctx, "hazard.event.upserted", *event)); err != nil {
+		return fmt.Errorf("enqueue HazardEvent outbox: %w", err)
+	}
 	return nil
 }
 
@@ -225,6 +239,7 @@ func (s *Store) writeRecord(ctx context.Context, u *unit, r record) error {
 	if err != nil {
 		return err
 	}
+
 	op, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
 	e := r.event
@@ -248,14 +263,67 @@ func (s *Store) ensureSchema(ctx context.Context, u *unit) error {
  latitude DOUBLE PRECISION NOT NULL,longitude DOUBLE PRECISION NOT NULL,
  occurred_at TIMESTAMPTZ NOT NULL,ingested_at TIMESTAMPTZ NOT NULL,attributes JSONB NOT NULL DEFAULT '{}',
  partition_id INTEGER NOT NULL,revision BIGINT NOT NULL,PRIMARY KEY(source,source_ref_id));
- CREATE INDEX IF NOT EXISTS p1_occurred ON hazard_events(partition_id,occurred_at,hazard_id);
- CREATE INDEX IF NOT EXISTS p1_ingested ON hazard_events(partition_id,ingested_at,hazard_id);
  CREATE TABLE IF NOT EXISTS p1_metadata (singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK(singleton),
  unit_name TEXT NOT NULL,node_name TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'new',
  checkpoint TEXT NOT NULL DEFAULT '',copied BIGINT NOT NULL DEFAULT 0);
- INSERT INTO p1_metadata(singleton,unit_name) VALUES(true,'') ON CONFLICT DO NOTHING;`)
+ INSERT INTO p1_metadata(singleton,unit_name) VALUES(true,'') ON CONFLICT DO NOTHING;
+ CREATE INDEX IF NOT EXISTS p1_occurred ON hazard_events(partition_id,occurred_at,hazard_id);
+ CREATE INDEX IF NOT EXISTS p1_ingested ON hazard_events(partition_id,ingested_at,hazard_id);
+ ;`)
 	if err != nil {
 		return err
+	}
+
+	_, err = u.pool.Exec(ctx, `ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS partition_id INTEGER;
+ ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS revision BIGINT;
+ UPDATE hazard_events SET partition_id=0 WHERE partition_id IS NULL;
+ UPDATE hazard_events SET revision=1 WHERE revision IS NULL;`)
+	if err != nil {
+		return err
+	}
+	rows, err := u.pool.Query(ctx, `
+		SELECT source, source_ref_id
+		FROM hazard_events
+		WHERE partition_id=0`)
+	if err != nil {
+		return err
+	}
+	type existingIdentity struct {
+		source, sourceRefID string
+	}
+	identities := make([]existingIdentity, 0)
+	for rows.Next() {
+		var identity existingIdentity
+		if err := rows.Scan(&identity.source, &identity.sourceRefID); err != nil {
+			rows.Close()
+			return err
+		}
+		identities = append(identities, identity)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	batch := &pgx.Batch{}
+	for _, identity := range identities {
+		partition := partitionFor(identity.source, identity.sourceRefID)
+		batch.Queue(`
+			UPDATE hazard_events
+			SET partition_id=$1
+			WHERE source=$2 AND source_ref_id=$3`,
+			partition, identity.source, identity.sourceRefID)
+	}
+	if len(identities) > 0 {
+		results := u.pool.SendBatch(ctx, batch)
+		for range identities {
+			if _, err := results.Exec(); err != nil {
+				results.Close()
+				return err
+			}
+		}
+		if err := results.Close(); err != nil {
+			return err
+		}
 	}
 	_, err = u.pool.Exec(ctx, "UPDATE p1_metadata SET unit_name=$1 WHERE singleton=true", u.name)
 	return err

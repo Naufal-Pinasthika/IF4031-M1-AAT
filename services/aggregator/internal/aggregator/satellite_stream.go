@@ -43,12 +43,12 @@ func NewSatelliteStream(baseURL, token string, logger *slog.Logger) *SatelliteSt
 	}
 }
 
-func (f *SatelliteStream) Run(ctx context.Context, handler func(SatelliteStreamEvent) error) error {
+func (f *SatelliteStream) Run(ctx context.Context, fromOffset int64, handler func(SatelliteStreamEvent) error) error {
 	if f.token == "" {
 		return fmt.Errorf("SATELLITE_TOKEN is required")
 	}
 
-	offset := int64(0)
+	offset := fromOffset
 	backoff := time.Second
 	for ctx.Err() == nil {
 		nextOffset, err := f.consume(ctx, offset, handler)
@@ -61,7 +61,6 @@ func (f *SatelliteStream) Run(ctx context.Context, handler func(SatelliteStreamE
 		if err != nil {
 			f.logger.Warn("satellite_stream_disconnected", "offset", offset, "backoff_ms", backoff.Milliseconds(), "error", err)
 		}
-		backoff = time.Second
 
 		timer := time.NewTimer(backoff)
 		select {

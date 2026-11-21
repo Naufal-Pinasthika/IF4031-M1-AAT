@@ -27,24 +27,59 @@ type SatelliteDetection struct {
 }
 
 func (d *SatelliteDetection) UnmarshalJSON(data []byte) error {
-	type plain SatelliteDetection
-	var decoded plain
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
+	var fields struct {
+		Satellite  string          `json:"satellite"`
+		AcqDate    string          `json:"acq_date"`
+		AcqTime    json.RawMessage `json:"acq_time"`
+		Latitude   float64         `json:"latitude"`
+		Longitude  float64         `json:"longitude"`
+		Confidence string          `json:"confidence"`
+		FRP        float64         `json:"frp"`
 	}
-	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	*d = SatelliteDetection(decoded)
-	d.LatitudeText = rawCoordinateText(fields, "latitude")
-	d.LongitudeText = rawCoordinateText(fields, "longitude")
-	parsed, err := ParseDetectionTime(d.AcqDate, d.AcqTime)
+	acqTime, err := numericAcqTime(fields.AcqTime)
 	if err != nil {
 		return err
 	}
-	d.DetectedAt = parsed
+	parsed, err := ParseDetectionTime(fields.AcqDate, acqTime)
+	if err != nil {
+		return err
+	}
+	*d = SatelliteDetection{
+		Satellite:  fields.Satellite,
+		AcqDate:    fields.AcqDate,
+		AcqTime:    acqTime,
+		Latitude:   fields.Latitude,
+		Longitude:  fields.Longitude,
+		Confidence: fields.Confidence,
+		FRP:        fields.FRP,
+		DetectedAt: parsed,
+	}
+
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawFields); err != nil {
+		return err
+	}
+	d.LatitudeText = rawCoordinateText(rawFields, "latitude")
+	d.LongitudeText = rawCoordinateText(rawFields, "longitude")
 	return nil
+}
+
+func numericAcqTime(raw json.RawMessage) (string, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return "", fmt.Errorf("acq_time is required")
+	}
+	if raw[0] == '"' {
+		return "", fmt.Errorf("acq_time must be a JSON number")
+	}
+	value, err := strconv.ParseInt(string(raw), 10, 64)
+	if err != nil {
+		return "", fmt.Errorf("acq_time must be a JSON integer")
+	}
+	return strconv.FormatInt(value, 10), nil
 }
 
 func rawCoordinateText(fields map[string]json.RawMessage, name string) string {
@@ -98,6 +133,21 @@ func DetectionKey(detection SatelliteDetection) string {
 func DetectionClusterID(detection SatelliteDetection) string {
 	sum := sha256.Sum256([]byte(DetectionKey(detection)))
 	return "fire-" + hex.EncodeToString(sum[:])[:16]
+}
+
+func DetectionComponentClusterID(detections []SatelliteDetection) string {
+	keys := detectionKeys(detections)
+	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
+	return "fire-" + hex.EncodeToString(sum[:])[:16]
+}
+
+func detectionKeys(detections []SatelliteDetection) []string {
+	keys := make([]string, 0, len(detections))
+	for _, detection := range detections {
+		keys = append(keys, DetectionKey(detection))
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func DetectionsConnected(left, right SatelliteDetection) bool {
@@ -172,6 +222,12 @@ func ClusterDetections(detections []SatelliteDetection) ([]FireCluster, []Satell
 			singles = append(singles, component[0])
 		}
 	}
+	sort.Slice(clusters, func(i, j int) bool {
+		return DetectionKey(clusters[i].Detections[0]) < DetectionKey(clusters[j].Detections[0])
+	})
+	sort.Slice(singles, func(i, j int) bool {
+		return DetectionKey(singles[i]) < DetectionKey(singles[j])
+	})
 	return clusters, singles
 }
 

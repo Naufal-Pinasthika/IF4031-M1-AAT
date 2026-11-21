@@ -46,7 +46,7 @@ func main() {
 	}
 	defer publisher.Close()
 	tracker := status.NewTracker()
-	service := aggregator.NewAggregator(poller, satellite, eventStore, publisher, cfg, logger, tracker)
+	service := aggregator.NewAggregator(poller, satellite, eventStore, cfg, logger, tracker)
 	apiHandler := handler.New(eventStore, tracker)
 	// p1
 	p1Handler := handler.NewP1(eventStore, cfg.AuditToken)
@@ -56,6 +56,7 @@ func main() {
 	defer stop()
 	// p1: recovery continues even when live polling is disabled.
 	go eventStore.RunRecovery(ctx)
+	go eventStore.RunOutbox(ctx, publisher)
 	if !cfg.ImportOnly {
 		go service.Run(ctx)
 	}

@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/broker"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/config"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/correlation"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
@@ -19,18 +18,14 @@ import (
 type EventStore interface {
 	GetEventBySourceRef(context.Context, string, string) (store.EventLookup, error) // p1
 	Upsert(ctx context.Context, event *model.HazardEvent) error
-	ProcessSatelliteEvent(ctx context.Context, eventType string, payload []byte, offset int64) ([]model.HazardEvent, error)
-}
-
-type EventPublisher interface {
-	Publish(ctx context.Context, envelope broker.EventEnvelope) error
+	ProcessSatelliteEvent(ctx context.Context, eventType string, payload []byte, offset int64) ([]model.HazardEvent, []model.HazardEvent, error)
+	SatelliteOffset(ctx context.Context) (int64, error)
 }
 
 type Aggregator struct {
 	poller    *Poller
 	satellite *SatelliteConsumer
 	store     EventStore
-	publisher EventPublisher
 	config    config.Config
 	logger    *slog.Logger
 	status    *status.Tracker
@@ -55,12 +50,11 @@ var volcanoReferences = map[string]volcanoReference{
 	"DUKONO":        {Name: "Gunung Dukono", Latitude: 1.69867327144, Longitude: 127.87801665200},
 }
 
-func NewAggregator(poller *Poller, satellite *SatelliteConsumer, store EventStore, publisher EventPublisher, cfg config.Config, logger *slog.Logger, tracker *status.Tracker) *Aggregator {
+func NewAggregator(poller *Poller, satellite *SatelliteConsumer, store EventStore, cfg config.Config, logger *slog.Logger, tracker *status.Tracker) *Aggregator {
 	return &Aggregator{
 		poller:    poller,
 		satellite: satellite,
 		store:     store,
-		publisher: publisher,
 		config:    cfg,
 		logger:    logger,
 		status:    tracker,
@@ -75,17 +69,21 @@ func (a *Aggregator) Run(ctx context.Context) {
 }
 
 func (a *Aggregator) runSatellite(ctx context.Context) {
-	err := a.satellite.Consume(ctx, func(event SatelliteStreamEvent) error {
-		events, err := a.store.ProcessSatelliteEvent(ctx, event.Type, event.Data, event.Offset)
+	fromOffset, err := a.store.SatelliteOffset(ctx)
+	if err != nil {
+		a.logger.Error("satellite_offset_load_failed", "error", err)
+		return
+	}
+	err = a.satellite.Consume(ctx, fromOffset, func(event SatelliteStreamEvent) error {
+		events, deleted, err := a.store.ProcessSatelliteEvent(ctx, event.Type, event.Data, event.Offset)
 		if err != nil {
 			return err
 		}
-		correlationID := fmt.Sprintf("satellite-%d", event.Offset)
 		for i := range events {
-			operationCtx := correlation.WithID(ctx, correlationID)
-			if err := a.publish(operationCtx, events[i], correlationID); err != nil {
-				return err
-			}
+			_ = events[i]
+		}
+		for i := range deleted {
+			_ = deleted[i]
 		}
 		a.status.Success("SATELIT", time.Now())
 		return nil
@@ -200,9 +198,6 @@ func (a *Aggregator) processBMKG(ctx context.Context, batch BMKGBatch) error {
 		if err := a.store.Upsert(operationCtx, &hazard); err != nil {
 			return err
 		}
-		if err := a.publish(operationCtx, hazard, batch.CorrelationID); err != nil {
-			return err
-		}
 	}
 
 	// p1 preserve each warning identity, including warnings arriving after the quake batch
@@ -231,9 +226,6 @@ func (a *Aggregator) processBMKG(ctx context.Context, batch BMKGBatch) error {
 		if err = a.store.Upsert(operationCtx, &hazard); err != nil {
 			return err
 		}
-		if err = a.publish(operationCtx, hazard, batch.CorrelationID); err != nil {
-			return err
-		}
 	}
 
 	a.logger.Info("bmkg_batch_received", "events", len(batch.Events), "warnings", len(batch.Warnings), "correlation_id", batch.CorrelationID)
@@ -251,35 +243,9 @@ func (a *Aggregator) processPVMBG(ctx context.Context, batch PVMBGBatch) error {
 		if err := a.store.Upsert(operationCtx, &hazard); err != nil {
 			return err
 		}
-		if err := a.publish(operationCtx, hazard, batch.CorrelationID); err != nil {
-			return err
-		}
 	}
 
 	a.logger.Info("pvmbg_batch_received", "reports", len(batch.Reports), "correlation_id", batch.CorrelationID)
-	return nil
-}
-
-func (a *Aggregator) publish(ctx context.Context, event model.HazardEvent, correlationID string) error {
-	if a.publisher == nil {
-		return fmt.Errorf("event publisher is not configured")
-	}
-
-	envelope := broker.EventEnvelope{
-		EventType:     "hazard.event.upserted",
-		SchemaVersion: 1,
-		CorrelationID: correlationID,
-		PublishedAt:   time.Now().UTC(),
-		Data:          event,
-	}
-	startedAt := time.Now()
-	err := a.publisher.Publish(ctx, envelope)
-	latency := time.Since(startedAt).Milliseconds()
-	if err != nil {
-		a.logger.Error("hazard_event_publish_failed", "hazard_id", event.HazardID, "correlation_id", correlationID, "latency_ms", latency, "error", err)
-		return err
-	}
-	a.logger.Info("hazard_event_published", "hazard_id", event.HazardID, "correlation_id", correlationID, "latency_ms", latency)
 	return nil
 }
 
