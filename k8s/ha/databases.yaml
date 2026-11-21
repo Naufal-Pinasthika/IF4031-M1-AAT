@@ -1,0 +1,89 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: coordinator-ha
+  namespace: sistem-informasi-kebencanaan-bnpb
+  annotations:
+    alpha.cnpg.io/failoverQuorum: 'true'
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.11
+  inheritedMetadata:
+    labels:
+      role: store
+      storage-owner: aggregator
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: required
+    topologyKey: kubernetes.io/hostname
+  storage:
+    storageClass: local-path
+    size: 2Gi
+  resources:
+    requests:
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  failoverDelay: 0
+  enableSuperuserAccess: true
+  bootstrap:
+    initdb:
+      database: coordination
+      owner: aggregator_coord
+      secret:
+        name: coordinator-ha-app
+  postgresql:
+    synchronous:
+      method: any
+      number: 1
+      dataDurability: required
+    enableAlterSystem: false
+    parameters:
+      shared_buffers: 128MB
+      max_connections: '100'
+      synchronous_commit: 'on'
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: notifier-ha
+  namespace: sistem-informasi-kebencanaan-bnpb
+  annotations:
+    alpha.cnpg.io/failoverQuorum: 'true'
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.11
+  inheritedMetadata:
+    labels:
+      role: store
+      storage-owner: notifier-consumer
+  affinity:
+    enablePodAntiAffinity: true
+    podAntiAffinityType: required
+    topologyKey: kubernetes.io/hostname
+  storage:
+    storageClass: local-path
+    size: 2Gi
+  resources:
+    requests:
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+  failoverDelay: 0
+  enableSuperuserAccess: true
+  bootstrap:
+    initdb:
+      database: notifications
+      owner: notifier
+      secret:
+        name: notifier-ha-app
+  postgresql:
+    synchronous:
+      method: any
+      number: 1
+      dataDurability: required
+    enableAlterSystem: false
+    parameters:
+      shared_buffers: 128MB
+      max_connections: '60'
+      synchronous_commit: 'on'

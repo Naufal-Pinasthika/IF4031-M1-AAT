@@ -1,0 +1,74 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ha-database-owner-only
+  namespace: sistem-informasi-kebencanaan-bnpb
+spec:
+  podSelector:
+    matchExpressions:
+    - key: cnpg.io/cluster
+      operator: In
+      values: [coordinator-ha, notifier-ha]
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          cnpg.io/cluster: coordinator-ha
+    - podSelector:
+        matchLabels:
+          cnpg.io/cluster: notifier-ha
+    ports:
+    - {port: 8000, protocol: TCP}
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: cnpg-system
+    ports:
+    - {port: 8000, protocol: TCP}
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: tester-agent
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: coordinator-ha-client
+  namespace: sistem-informasi-kebencanaan-bnpb
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: coordinator-ha
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: aggregator
+    - podSelector:
+        matchLabels:
+          cnpg.io/cluster: coordinator-ha
+    ports:
+    - {port: 5432, protocol: TCP}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: notifier-ha-client
+  namespace: sistem-informasi-kebencanaan-bnpb
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: notifier-ha
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: notifier-consumer
+    - podSelector:
+        matchLabels:
+          cnpg.io/cluster: notifier-ha
+    ports:
+    - {port: 5432, protocol: TCP}
