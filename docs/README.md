@@ -13,7 +13,7 @@ from the repository root unless stated otherwise.
 | Look up Compose APIs, credentials, and defaults | [API/configuration reference](reference/api-configuration.md) |
 | Demonstrate M1 cases | [M1 runbook](runbooks/m1-demo.md) |
 | Understand M2/manual demonstrations | [M2 guide](guides/m2.md) |
-| Locate future standalone test tooling | [Test directory](../test/README.md) |
+| Run report-facing P3/P4 E2E tests | [Test directory](../test/README.md) |
 | Check what is actually proven | [Source/runtime and verification status](status/README.md) |
 
 ## Design and contracts

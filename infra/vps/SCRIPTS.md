@@ -5,8 +5,10 @@ provisioning, deployment, build, and operational access tooling, not test suites
 
 The former load, fault-injection, diagnosis, profiling, evidence-collection,
 and tooling-test runners were deleted. They were **not** moved. Future standalone
-test tooling belongs in [`test/`](../../test/README.md); no replacement suite
-exists yet. Existing service-local tests and `scripts/` demonstrations remain.
+test tooling belongs in [`test/`](../../test/README.md). Numbered P3/P4
+report-facing E2E scenarios now run from the laptop against the VPS lab; they
+do not replace every deleted runner. Unit and PostgreSQL integration tests
+remain beside their services, and `scripts/` demonstrations remain available.
 
 ## Provisioning and deployment
 
