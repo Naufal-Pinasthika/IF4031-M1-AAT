@@ -23,9 +23,10 @@ var ErrSourceClockStale = errors.New("source_clock_stalled")
 var ErrSourceClockRegression = errors.New("source_clock_regressed")
 
 type Coordinator struct {
-	pool    *pgxpool.Pool
-	timeout time.Duration
-	storage []storageconfig.StorageUnit
+	pool         *pgxpool.Pool
+	timeout      time.Duration
+	storage      []storageconfig.StorageUnit
+	criticalLane bool
 }
 
 type Lease struct {
@@ -85,6 +86,10 @@ func NewCoordinator(ctx context.Context, databaseURL string, timeout time.Durati
 		return nil, err
 	}
 	if err := retryStartup(ctx, logger, func() error { return coordinator.initIngress(ctx) }); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	if err := retryStartup(ctx, logger, func() error { return coordinator.initSourceRetry(ctx) }); err != nil {
 		pool.Close()
 		return nil, err
 	}

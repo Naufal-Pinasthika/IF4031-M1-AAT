@@ -21,6 +21,7 @@ type Config struct {
 	DatabaseURL          string
 	KafkaBrokers         []string
 	KafkaTopic           string
+	KafkaCriticalTopic   string
 	BMKGURL              string
 	BMKGAPIKey           string
 	PVMBGURL             string
@@ -38,6 +39,7 @@ type Config struct {
 	CoastalInterval      time.Duration
 	HTTPTimeout          time.Duration
 	CoastalTimeout       time.Duration
+	CoastalLeaseTTL      time.Duration
 	CoastalMaxStaleness  time.Duration
 	CircuitFailures      int
 	CircuitOpenDuration  time.Duration
@@ -134,6 +136,13 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	coastalLeaseTTL, err := durationFromEnv("COASTAL_LEASE_TTL_MS", 4000)
+	if err != nil {
+		return Config{}, err
+	}
+	if coastalLeaseTTL <= coastalTimeout+coordinationTimeout || coordinationTimeout*3 >= coastalLeaseTTL*2 {
+		return Config{}, fmt.Errorf("COASTAL_LEASE_TTL_MS must cover coastal HTTP and coordination deadlines with renewal headroom")
+	}
 	circuitFailures, err := positiveIntFromEnv("COASTAL_CIRCUIT_FAILURES", 3)
 	if err != nil {
 		return Config{}, err
@@ -178,6 +187,7 @@ func Load() (Config, error) {
 		DatabaseURL:          databaseURL,
 		KafkaBrokers:         splitCommaSeparated(os.Getenv("KAFKA_BROKERS"), "localhost:9092"),
 		KafkaTopic:           envOrDefault("KAFKA_TOPIC", "hazard.events.v1"),
+		KafkaCriticalTopic:   strings.TrimSpace(os.Getenv("KAFKA_CRITICAL_TOPIC")),
 		BMKGURL:              envOrDefault("BMKG_URL", "http://localhost:8081"),
 		BMKGAPIKey:           os.Getenv("BMKG_API_KEY"),
 		PVMBGURL:             envOrDefault("PVMBG_URL", "http://localhost:8082"),
@@ -191,6 +201,7 @@ func Load() (Config, error) {
 		CoastalInterval:      coastalInterval,
 		HTTPTimeout:          httpTimeout,
 		CoastalTimeout:       coastalTimeout,
+		CoastalLeaseTTL:      coastalLeaseTTL,
 		CoastalMaxStaleness:  coastalMaxStaleness,
 		CircuitFailures:      circuitFailures,
 		CircuitOpenDuration:  circuitOpenDuration,

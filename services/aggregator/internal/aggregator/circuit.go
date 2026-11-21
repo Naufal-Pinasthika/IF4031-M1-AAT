@@ -71,3 +71,15 @@ func (c *CircuitBreaker) State() string {
 	defer c.mu.Unlock()
 	return c.state
 }
+
+// An internal coordination failure is not evidence of a source failure. A
+// half-open permit must still be released so a later probe can run.
+func (c *CircuitBreaker) Abandon(now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state == "half_open" {
+		c.state = "open"
+		c.openUntil = now.Add(c.openDuration)
+		c.halfOpenProbe = false
+	}
+}

@@ -83,6 +83,9 @@ func (c *Coordinator) AcceptEvent(ctx context.Context, source, holder string, to
 func (c *Coordinator) admitTx(op context.Context, tx pgx.Tx, source, holder string, token int64, event *model.HazardEvent, correlationID string, acceptedAt time.Time) error {
 	copyEvent := *event
 	copyEvent.HazardID = eventID(source, event.SourceRefID)
+	// Canonical timestamptz is microsecond-precision. Normalize before hashing
+	// so a parent read back from storage cannot invent a changed warning.
+	copyEvent.OccuredAt = copyEvent.OccuredAt.UTC().Truncate(time.Microsecond)
 	copyEvent.IngestedAt = time.Time{}
 	payload, err := json.Marshal(copyEvent)
 	if err != nil {
@@ -147,6 +150,7 @@ func (c *Coordinator) AcceptBatch(ctx context.Context, source, holder string, to
 			return fmt.Errorf("invalid fenced batch identity")
 		}
 		event.HazardID = eventID(source, event.SourceRefID)
+		event.OccuredAt = event.OccuredAt.UTC().Truncate(time.Microsecond)
 		if seen[event.HazardID] {
 			return fmt.Errorf("duplicate identity inside fenced batch")
 		}
@@ -230,6 +234,9 @@ type AcceptedEvent struct {
 
 func (c *Coordinator) projectionTargets(event model.HazardEvent) []string {
 	targets := []string{"broker"}
+	if critical, _ := event.Attributes["critical"].(bool); c.criticalLane && string(event.Source) == "SENSOR_PANTAI" && critical {
+		targets = append(targets, "broker:critical")
+	}
 	partition := partitionFor(string(event.Source), event.SourceRefID)
 	if len(c.storage) == 1 {
 		return append(targets, "canonical:"+c.storage[0].Name)

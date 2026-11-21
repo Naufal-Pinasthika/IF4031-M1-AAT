@@ -58,6 +58,23 @@ func main() {
 	tracker := status.NewTracker()
 	tracker.EnableSharedHealth(3*time.Second + cfg.CoordinationTimeout)
 	service := aggregator.NewAggregator(poller, satellite, eventStore, coordinator, publisher, cfg, logger, tracker)
+	if cfg.KafkaCriticalTopic != "" {
+		if cfg.KafkaCriticalTopic == cfg.KafkaTopic {
+			logger.Error("critical_topic_must_be_separate")
+			os.Exit(1)
+		}
+		criticalPublisher, err := broker.NewKafkaPublisher(cfg.KafkaBrokers, cfg.KafkaCriticalTopic)
+		if err != nil {
+			logger.Error("critical_publisher_initialization_failed", "error", err)
+			os.Exit(1)
+		}
+		defer criticalPublisher.Close()
+		if err := coordinator.EnableCriticalLane(startupCtx); err != nil {
+			logger.Error("critical_lane_initialization_failed", "error", err)
+			os.Exit(1)
+		}
+		service.SetCriticalPublisher(criticalPublisher)
+	}
 	fillReader := handler.NewLimitedReader(eventStore, cfg.MaxInFlight, cfg.FieldReservedSlots)
 	readSide := handler.NewCachedReader(fillReader, cfg.ReadCacheTTL, 2*cfg.StoreTimeout+100*time.Millisecond, logger)
 	var projection *store.ReadProjection
