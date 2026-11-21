@@ -47,12 +47,25 @@ func NewReadProjection(ctx context.Context, url string) (*ReadProjection, error)
 	result := &ReadProjection{regular: p, field: f}
 	op, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	_, err = p.Exec(op, `CREATE TABLE IF NOT EXISTS read_page_projection (
+	tx, err := p.Begin(op)
+	if err != nil {
+		result.Close()
+		return nil, err
+	}
+	defer tx.Rollback(op)
+	// Schema initialization has its own bounded budget. The 100 ms runtime
+	// cache-query timeout must not also truncate transactional DDL under load.
+	_, err = tx.Exec(op, `SET LOCAL statement_timeout='2000'; CREATE TABLE IF NOT EXISTS read_page_projection (
  slot SMALLINT PRIMARY KEY CHECK(slot>=0 AND slot<32),
  cache_key TEXT NOT NULL CHECK(length(cache_key)<=64),
  payload BYTEA NOT NULL CHECK(octet_length(payload)<=1048576),
  expires_at TIMESTAMPTZ NOT NULL)`)
 	if err != nil {
+		_ = tx.Rollback(op)
+		result.Close()
+		return nil, err
+	}
+	if err := tx.Commit(op); err != nil {
 		result.Close()
 		return nil, err
 	}

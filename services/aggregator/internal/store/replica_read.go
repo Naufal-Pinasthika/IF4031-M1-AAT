@@ -95,6 +95,9 @@ func readFailureReason(err error) string {
 }
 
 func matchesRecord(e model.HazardEvent, f EventFilter, c *pageCursor) bool {
+	if removed, _ := e.Attributes["_retracted"].(bool); removed {
+		return false
+	}
 	if f.Source != "" && string(e.Source) != f.Source || f.HazardType != "" && string(e.HazardType) != f.HazardType ||
 		f.Severity != "" && string(e.Severity) != f.Severity || f.id != "" && e.HazardID != f.id ||
 		f.From != nil && e.OccuredAt.Before(*f.From) || f.To != nil && e.OccuredAt.After(*f.To) ||

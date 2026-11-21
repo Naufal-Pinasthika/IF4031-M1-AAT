@@ -22,8 +22,6 @@ import (
 // p1 delayed tsunami warnings look up the already persisted parent quake.
 type EventStore interface {
 	GetEventBySourceRef(context.Context, string, string) (store.EventLookup, error) // p1
-	ProcessSatelliteEvent(ctx context.Context, eventType string, payload []byte, offset int64) ([]model.HazardEvent, []model.HazardEvent, error)
-	SatelliteOffset(ctx context.Context) (int64, error)
 	UpsertAccepted(context.Context, *model.HazardEvent, int64) error
 	UpsertAcceptedTarget(context.Context, *model.HazardEvent, int64, string) error
 }
@@ -102,7 +100,9 @@ func (a *Aggregator) Run(ctx context.Context) {
 	var workers sync.WaitGroup
 	workers.Go(func() { a.runBMKG(ctx) })
 	workers.Go(func() { a.runPVMBG(ctx) })
-	workers.Go(func() { a.runSatellite(ctx) })
+	if a.config.SatelliteToken != "" {
+		workers.Go(func() { a.runSatellite(ctx) })
+	}
 	if a.config.CoastalToken != "" {
 		workers.Go(func() { a.runCoastal(ctx) })
 	}
@@ -110,27 +110,63 @@ func (a *Aggregator) Run(ctx context.Context) {
 }
 
 func (a *Aggregator) runSatellite(ctx context.Context) {
-	fromOffset, err := a.store.SatelliteOffset(ctx)
-	if err != nil {
-		a.logger.Error("satellite_offset_load_failed", "error", err)
+	c, ok := a.coordinator.(*store.Coordinator)
+	if !ok {
 		return
 	}
-	err = a.satellite.Consume(ctx, fromOffset, func(event SatelliteStreamEvent) error {
-		events, deleted, err := a.store.ProcessSatelliteEvent(ctx, event.Type, event.Data, event.Offset)
-		if err != nil {
-			return err
+	for ctx.Err() == nil {
+		lease, leader, err := c.AcquireOrRenewLease(ctx, "SATELIT", a.config.InstanceID, a.config.LeaseTTL)
+		if err == nil && leader {
+			cycle, stop := a.leaseContext(ctx, "SATELIT", lease.Token)
+			observed := make(chan struct{})
+			go func() {
+				defer close(observed)
+				for cycle.Err() == nil {
+					probe, cancel := context.WithTimeout(cycle, 4*time.Second)
+					session, err := a.satellite.stream.Session(probe)
+					if err == nil {
+						_ = c.ObserveSatelliteSession(probe, session.LatestOffset)
+					}
+					cancel()
+					timer := time.NewTimer(5 * time.Second)
+					select {
+					case <-cycle.Done():
+						timer.Stop()
+						return
+					case <-timer.C:
+					}
+				}
+			}()
+			offset, loadErr := c.SatelliteOffset(cycle)
+			if loadErr == nil {
+				loadErr = a.satellite.ConsumeBatches(cycle, offset, func(events []SatelliteStreamEvent) error {
+					batch := make([]model.SatelliteMutation, len(events))
+					for i, event := range events {
+						batch[i] = model.SatelliteMutation{Type: event.Type, Payload: event.Data, Offset: event.Offset, ReceivedAt: event.ReceivedAt}
+					}
+					err := c.ProcessSatelliteBatch(cycle, a.config.InstanceID, lease.Token, batch)
+					if err == nil {
+						a.status.Success("SATELIT", time.Now())
+					}
+					return err
+				})
+			}
+			stop()
+			<-observed
+			release, done := context.WithTimeout(context.Background(), a.config.CoordinationTimeout)
+			_ = c.ReleaseLease(release, "SATELIT", a.config.InstanceID, lease.Token)
+			done()
+			if loadErr != nil && ctx.Err() == nil {
+				a.recordPollFailure("SATELIT", loadErr)
+			}
 		}
-		for i := range events {
-			_ = events[i]
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
 		}
-		for i := range deleted {
-			_ = deleted[i]
-		}
-		a.status.Success("SATELIT", time.Now())
-		return nil
-	})
-	if err != nil && ctx.Err() == nil {
-		a.logger.Error("satellite_feed_failed", "error", err)
 	}
 }
 
@@ -151,16 +187,7 @@ func (a *Aggregator) runBMKG(ctx context.Context) {
 
 func (a *Aggregator) runPVMBG(ctx context.Context) {
 	a.runSource(ctx, "PVMBG", a.config.PollingInterval, func(cycle context.Context, token int64) error {
-		since, err := a.coordinator.TimeCursor(cycle, "PVMBG", a.config.StartSince)
-		if err != nil {
-			return err
-		}
-		batch, err := a.poller.PollPVMBG(cycle, since)
-		if err == nil {
-			batch.Reports = volcanicReportsAfter(batch.Reports, since)
-			err = a.processPVMBG(cycle, batch, token)
-		}
-		return err
+		return a.pollPVMBGInbox(cycle, token)
 	})
 }
 
@@ -394,6 +421,9 @@ func (a *Aggregator) publish(ctx context.Context, event model.HazardEvent, corre
 		PublishedAt:      time.Now().UTC(),
 		Data:             event,
 		IngestionVersion: version,
+	}
+	if removed, _ := event.Attributes["_retracted"].(bool); removed {
+		envelope.EventType = "hazard.event.deleted"
 	}
 	startedAt := time.Now()
 	err := a.publisher.Publish(ctx, envelope)

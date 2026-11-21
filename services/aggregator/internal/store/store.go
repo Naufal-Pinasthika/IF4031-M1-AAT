@@ -24,7 +24,6 @@ type Store struct {
 	timeout     time.Duration
 	logger      *slog.Logger
 	writer      sync.Mutex
-	satellite   sync.Mutex
 	state       sync.RWMutex
 	recovery    sync.Mutex
 	antiEntropy map[[2]int]string // elected recovery worker only; restart safely rescans
@@ -124,12 +123,6 @@ func New(ctx context.Context, configs []config.StorageUnit, timeout time.Duratio
 		op, cancel := context.WithTimeout(ctx, timeout)
 		err = s.ensureSchema(op, u)
 		if err == nil {
-			err = s.ensureSatelliteSchema(op, u)
-		}
-		if err == nil {
-			err = s.ensureOutboxSchema(op, u)
-		}
-		if err == nil {
 			u.online = true
 			var status string
 			err = u.pool.QueryRow(op, "SELECT status FROM p1_metadata WHERE singleton=true").Scan(&status)
@@ -168,15 +161,6 @@ func New(ctx context.Context, configs []config.StorageUnit, timeout time.Duratio
 	}
 	if len(s.units) == 1 && s.units[0].online {
 		s.units[0].ready = true
-	}
-	for i, u := range s.units {
-		if len(s.units) == 1 {
-			u.ready = true
-			continue
-		}
-		if u.online {
-			s.recoverUnit(ctx, i, u.ready)
-		}
 	}
 	// Starting an additional read replica must NOT mark healthy shared stores
 	// 'recovering' and recopy the dataset. All nonempty repairs are performed
@@ -403,9 +387,6 @@ func (s *Store) upsert(ctx context.Context, event *model.HazardEvent, ingestionV
 	if successes != len(s.destinations(partition)) {
 		return fmt.Errorf("canonical replication incomplete: %d/%d destinations acknowledged", successes, len(s.destinations(partition)))
 	}
-	if err := s.enqueueOutbox(ctx, outboxEnvelope(ctx, "hazard.event.upserted", *event)); err != nil {
-		return fmt.Errorf("enqueue HazardEvent outbox: %w", err)
-	}
 	return nil
 }
 
@@ -551,14 +532,14 @@ func (s *Store) ensureSchema(ctx context.Context, u *unit) error {
 		return err
 	}
 
-	_, err = u.pool.Exec(ctx, `ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS partition_id INTEGER;
+	_, err = tx.Exec(ctx, `ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS partition_id INTEGER;
  ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS revision BIGINT;
  UPDATE hazard_events SET partition_id=0 WHERE partition_id IS NULL;
  UPDATE hazard_events SET revision=1 WHERE revision IS NULL;`)
 	if err != nil {
 		return err
 	}
-	identityRows, err := u.pool.Query(ctx, `
+	identityRows, err := tx.Query(ctx, `
 		SELECT source, source_ref_id
 		FROM hazard_events
 		WHERE partition_id=0`)
@@ -591,7 +572,7 @@ func (s *Store) ensureSchema(ctx context.Context, u *unit) error {
 			partition, identity.source, identity.sourceRefID)
 	}
 	if len(identities) > 0 {
-		results := u.pool.SendBatch(ctx, batch)
+		results := tx.SendBatch(ctx, batch)
 		for range identities {
 			if _, err := results.Exec(); err != nil {
 				results.Close()

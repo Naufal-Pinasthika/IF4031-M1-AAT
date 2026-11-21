@@ -77,7 +77,13 @@ func (s *Store) Apply(messageID string, envelope event.Envelope) (bool, error) {
 		}
 		version := uint64(envelope.IngestionVersion)
 		if (version == 0 && previous == 0) || version > previous {
-			if err := tx.Bucket(eventsBucket).Put(key, payload); err != nil {
+			var err error
+			if envelope.EventType == "hazard.event.deleted" {
+				err = tx.Bucket(eventsBucket).Delete(key)
+			} else {
+				err = tx.Bucket(eventsBucket).Put(key, payload)
+			}
+			if err != nil {
 				return err
 			}
 			if err := versions.Put(key, encodeCount(version)); err != nil {

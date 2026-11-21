@@ -26,6 +26,13 @@ type SatelliteDetection struct {
 	LongitudeText string    `json:"-"`
 }
 
+type SatelliteMutation struct {
+	Type       string
+	Payload    []byte
+	Offset     int64
+	ReceivedAt time.Time
+}
+
 func (d *SatelliteDetection) UnmarshalJSON(data []byte) error {
 	var fields struct {
 		Satellite  string          `json:"satellite"`

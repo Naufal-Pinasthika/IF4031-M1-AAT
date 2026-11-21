@@ -84,6 +84,10 @@ func NewCoordinator(ctx context.Context, databaseURL string, timeout time.Durati
 		pool.Close()
 		return nil, err
 	}
+	if err := retryStartup(ctx, logger, func() error { return coordinator.initIngress(ctx) }); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	return coordinator, nil
 }
 
@@ -429,7 +433,10 @@ func (c *Coordinator) ListUnprocessed(ctx context.Context, source string, limit 
 		}
 		cursor = &value
 	}
-	query := `SELECT message_id,source,received_at,reason,retryable,attempts,status FROM unprocessed_messages WHERE true`
+	query := `SELECT message_id,source,received_at,reason,retryable,attempts,status FROM (
+ SELECT message_id,source,received_at,reason,retryable,attempts,status FROM unprocessed_messages
+ UNION ALL SELECT message_id,source,received_at,reason,status='retrying',attempts,status FROM durable_inbox WHERE status<>'done'
+ ) pending WHERE true`
 	args := make([]any, 0, 5)
 	if source != "" {
 		args = append(args, source)

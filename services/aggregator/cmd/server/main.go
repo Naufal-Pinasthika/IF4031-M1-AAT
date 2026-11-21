@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/telemetry"
 	"log/slog"
 	"net/http"
@@ -86,6 +87,7 @@ func main() {
 	workers.Go(func() { tracker.RunSharedHealth(ctx, coordinator, time.Second) })
 	workers.Go(func() { eventStore.RunRecovery(ctx, coordinator, cfg.InstanceID, cfg.LeaseTTL) })
 	workers.Go(func() { service.RunDeliveries(ctx) })
+	workers.Go(func() { service.RunInbox(ctx) })
 	if !cfg.ImportOnly {
 		workers.Go(func() { service.Run(ctx) })
 	}
@@ -112,12 +114,26 @@ func main() {
 		if projection != nil {
 			projection.WriteMetrics(w)
 		}
+		metricCtx, cancel := context.WithTimeout(context.Background(), cfg.CoordinationTimeout)
+		defer cancel()
+		if stream, err := coordinator.SatelliteStats(metricCtx); err == nil {
+			for _, key := range []string{"committed_offset", "lag_offsets", "late_detections", "singleton_detections", "fires", "pending_projections", "p95_ingress_to_canonical_ms", "latency_samples"} {
+				if stream[key] != nil {
+					_, _ = fmt.Fprintf(w, "bnpb_satellite_%s %v\n", key, stream[key])
+				}
+			}
+		}
 	})
 	mux.HandleFunc("GET /internal/events", handler.AggregatorAuth(limiter.Wrap(apiHandler.GetEvents)))
 	mux.HandleFunc("GET /internal/events/{id}", handler.AggregatorAuth(limiter.Wrap(apiHandler.GetEventByID)))
 	mux.HandleFunc("GET /internal/source-status", handler.AggregatorAuth(limiter.Wrap(apiHandler.GetSourceStatus)))
 	mux.HandleFunc("GET /internal/polling", handler.AggregatorAuth(limiter.Wrap(p1Handler.GetPolling)))
 	mux.HandleFunc("GET /internal/unprocessed", handler.AggregatorAuth(limiter.Wrap(p1Handler.GetAuditUnprocessed)))
+	mux.HandleFunc("POST /internal/field-reports", handler.AggregatorAuth(p1Handler.PostFieldReport))
+	mux.HandleFunc("GET /internal/field-reports/{id}", handler.AggregatorAuth(p1Handler.GetFieldReport))
+	mux.HandleFunc("GET /internal/unprocessed/{id}", handler.AggregatorAuth(handler.OperationsOnly(p1Handler.GetInboxDetails)))
+	mux.HandleFunc("POST /internal/unprocessed/replay", handler.AggregatorAuth(handler.OperationsOnly(p1Handler.ReplayInbox)))
+	mux.HandleFunc("GET /internal/satellite-status", handler.AggregatorAuth(handler.OperationsOnly(p1Handler.GetSatelliteStats)))
 
 	// p1: audit has its own bearer credential and structured error contract.
 	mux.HandleFunc("GET /internal/audit/events", p1Handler.AuditAuth(p1Handler.GetAuditEvents))

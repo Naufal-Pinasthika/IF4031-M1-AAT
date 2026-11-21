@@ -151,7 +151,10 @@ func (s *Store) ListEvents(ctx context.Context, f EventFilter) (EventPage, error
 // Reachability is not evidence of replica completeness. A bounded inconsistent
 // page is explicitly partial; it must never silently certify an empty primary.
 func (s *Store) readPartition(ctx context.Context, partition int, f EventFilter, c *pageCursor, limit int) ([]model.HazardEvent, ReadStatus, error) {
-	conditions := []string{"partition_id=$1"}
+	// Do not let already-retracted history consume a healthy replica's page
+	// prefix. The unfiltered candidate lookup still retrieves a newer peer
+	// tombstone before choosing versions, so a stale live copy cannot reappear.
+	conditions := []string{"partition_id=$1", "COALESCE(attributes->>'_retracted','false')<>'true'"}
 	args := []any{partition}
 	add := func(column, operator string, value any) {
 		args = append(args, value)

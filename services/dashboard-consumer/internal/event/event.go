@@ -36,7 +36,7 @@ func Decode(payload []byte) (Envelope, error) {
 	if err := json.Unmarshal(payload, &envelope); err != nil {
 		return Envelope{}, fmt.Errorf("decode event envelope: %w", err)
 	}
-	if envelope.EventType != UpsertedType {
+	if envelope.EventType != UpsertedType && envelope.EventType != "hazard.event.deleted" {
 		return Envelope{}, fmt.Errorf("unsupported event type %q", envelope.EventType)
 	}
 	if envelope.SchemaVersion != 1 {

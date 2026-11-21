@@ -16,16 +16,22 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func (s *Store) ensureSatelliteSchema(ctx context.Context, u *unit) error {
-	_, err := u.pool.Exec(ctx, `
+func ensureSatelliteTx(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS satellite_events (
+		 hazard_id TEXT NOT NULL, source TEXT NOT NULL, source_ref_id TEXT PRIMARY KEY,
+		 hazard_type TEXT NOT NULL,severity TEXT NOT NULL,area_name TEXT NOT NULL,
+		 latitude DOUBLE PRECISION NOT NULL,longitude DOUBLE PRECISION NOT NULL,
+		 occurred_at TIMESTAMPTZ NOT NULL,ingested_at TIMESTAMPTZ NOT NULL,
+		 attributes JSONB NOT NULL,partition_id INTEGER NOT NULL,revision BIGINT NOT NULL);
 		CREATE TABLE IF NOT EXISTS satellite_feed_state (
 			singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK(singleton),
-			last_offset BIGINT NOT NULL DEFAULT 0,
+			last_offset BIGINT NOT NULL DEFAULT -1,
 			high_watermark TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01 00:00:00+00',
 			updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		);
 		INSERT INTO satellite_feed_state(singleton,last_offset)
-		VALUES(true,0) ON CONFLICT DO NOTHING;
+		VALUES(true,-1) ON CONFLICT DO NOTHING;
 
 		CREATE TABLE IF NOT EXISTS satellite_clusters (
 			cluster_id TEXT PRIMARY KEY,
@@ -62,58 +68,10 @@ func (s *Store) ensureSatelliteSchema(ctx context.Context, u *unit) error {
 	if err != nil {
 		return err
 	}
-	_, err = u.pool.Exec(ctx, `
+	_, err = tx.Exec(ctx, `
 		ALTER TABLE satellite_feed_state
 		ADD COLUMN IF NOT EXISTS high_watermark TIMESTAMPTZ
 		NOT NULL DEFAULT '1970-01-01 00:00:00+00';`)
-	return err
-}
-
-func (s *Store) SatelliteOffset(ctx context.Context) (int64, error) {
-	var u *unit
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		s.state.RLock()
-		for _, candidate := range s.units {
-			if candidate.online {
-				u = candidate
-				break
-			}
-		}
-		s.state.RUnlock()
-		if u != nil {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		case <-ticker.C:
-		}
-	}
-	var offset int64
-	err := u.pool.QueryRow(ctx,
-		`SELECT last_offset FROM satellite_feed_state WHERE singleton=true`,
-	).Scan(&offset)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
-	}
-	return offset, err
-}
-
-func (s *Store) deleteSatelliteReplica(ctx context.Context, u *unit, sourceRefID string) error {
-	s.state.RLock()
-	online := u.online
-	s.state.RUnlock()
-	if !online {
-		return fmt.Errorf("storage unit %s unavailable", u.name)
-	}
-	op, cancel := context.WithTimeout(ctx, s.timeout)
-	defer cancel()
-	_, err := u.pool.Exec(op, `
-		DELETE FROM hazard_events
-		WHERE source='SATELIT' AND source_ref_id=$1`,
-		sourceRefID)
 	return err
 }
 
@@ -300,32 +258,10 @@ func nearestProvinceName(latitude, longitude float64) string {
 	return nearest
 }
 
-func (s *Store) ProcessSatelliteEvent(ctx context.Context, eventType string, payload []byte, offset int64) ([]model.HazardEvent, []model.HazardEvent, error) {
-	s.satellite.Lock()
-	defer s.satellite.Unlock()
-
-	s.state.RLock()
-	var u *unit
-	for _, candidate := range s.units {
-		if candidate.online {
-			u = candidate
-			break
-		}
-	}
-	s.state.RUnlock()
-	if u == nil {
-		return nil, nil, fmt.Errorf("no satellite state storage unit is available")
-	}
-
-	tx, err := u.pool.Begin(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer tx.Rollback(ctx)
-
+func (s *Store) processSatelliteEventTx(ctx context.Context, tx pgx.Tx, eventType string, payload []byte, offset int64) ([]model.HazardEvent, []model.HazardEvent, error) {
 	var lastOffset int64
 	var highWatermark time.Time
-	err = tx.QueryRow(ctx,
+	err := tx.QueryRow(ctx,
 		`SELECT last_offset, high_watermark FROM satellite_feed_state WHERE singleton=true FOR UPDATE`,
 	).Scan(&lastOffset, &highWatermark)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -333,6 +269,9 @@ func (s *Store) ProcessSatelliteEvent(ctx context.Context, eventType string, pay
 	}
 	if offset <= lastOffset {
 		return nil, nil, nil
+	}
+	if offset != lastOffset+1 {
+		return nil, nil, fmt.Errorf("satellite offset gap: committed %d, received %d", lastOffset, offset)
 	}
 
 	var target model.SatelliteDetection
@@ -369,9 +308,6 @@ func (s *Store) ProcessSatelliteEvent(ctx context.Context, eventType string, pay
 					offset, highWatermark); err != nil {
 					return nil, nil, err
 				}
-				if err := tx.Commit(ctx); err != nil {
-					return nil, nil, err
-				}
 				return nil, nil, nil
 			}
 			if !errors.Is(err, pgx.ErrNoRows) {
@@ -398,7 +334,13 @@ func (s *Store) ProcessSatelliteEvent(ctx context.Context, eventType string, pay
 				&old.Latitude, &old.Longitude, &old.Confidence, &old.FRP, &clusterIDIgnored)
 			if err == nil {
 				if target.Satellite != "" {
+					// Coordinate lexemes are retained separately from their numeric values.
 					old.Satellite = target.Satellite
+				}
+				parts := strings.Split(oldKey, "|")
+				if len(parts) == 5 {
+					old.LatitudeText = parts[3]
+					old.LongitudeText = parts[4]
 				}
 				if target.AcqDate != "" {
 					old.AcqDate = target.AcqDate
@@ -406,16 +348,18 @@ func (s *Store) ProcessSatelliteEvent(ctx context.Context, eventType string, pay
 				if target.AcqTime != "" {
 					old.AcqTime = target.AcqTime
 				}
-				if target.Latitude != 0 {
+				if satellitePatchHas(payload, "latitude") {
 					old.Latitude = target.Latitude
+					old.LatitudeText = target.LatitudeText
 				}
-				if target.Longitude != 0 {
+				if satellitePatchHas(payload, "longitude") {
 					old.Longitude = target.Longitude
+					old.LongitudeText = target.LongitudeText
 				}
 				if target.Confidence != "" {
 					old.Confidence = target.Confidence
 				}
-				if target.FRP != 0 {
+				if satellitePatchHas(payload, "frp") {
 					old.FRP = target.FRP
 				}
 				old.DetectedAt, err = model.ParseDetectionTime(old.AcqDate, old.AcqTime)
@@ -546,35 +490,20 @@ func (s *Store) ProcessSatelliteEvent(ctx context.Context, eventType string, pay
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, nil, err
-	}
-
-	for i := range events {
-		event := events[i]
-		r := record{
-			event:     event,
-			partition: partitionFor(string(event.Source), event.SourceRefID),
-			revision:  time.Now().UnixNano(),
-		}
-		for _, index := range s.destinations(r.partition) {
-			if err := s.writeRecord(ctx, s.units[index], r); err != nil && !availabilityError(err) {
-				s.logger.Error("satellite_hazard_replication_failed",
-					"source_ref_id", event.SourceRefID, "error", err)
-			}
-		}
-	}
-	for i := range deleted {
-		tombstone := deleted[i]
-		for _, index := range s.destinations(partitionFor(string(tombstone.Source), tombstone.SourceRefID)) {
-			if err := s.deleteSatelliteReplica(ctx, s.units[index], tombstone.SourceRefID); err != nil &&
-				!availabilityError(err) {
-				s.logger.Error("satellite_hazard_delete_failed",
-					"source_ref_id", tombstone.SourceRefID, "error", err)
-			}
-		}
-	}
 	return events, deleted, nil
+}
+
+func satellitePatchHas(payload []byte, key string) bool {
+	var fields map[string]json.RawMessage
+	_ = json.Unmarshal(payload, &fields)
+	for _, name := range []string{"changes", "detection", "new", "current", "data"} {
+		if raw, ok := fields[name]; ok {
+			_ = json.Unmarshal(raw, &fields)
+			break
+		}
+	}
+	_, ok := fields[key]
+	return ok
 }
 
 func decodeSatelliteDetectionMutation(payload []byte, eventType string) (model.SatelliteDetection, string, error) {
@@ -661,7 +590,7 @@ func decodeSatelliteUpdate(payload []byte) (model.SatelliteDetection, string, er
 	}
 
 	updatePayload := payload
-	for _, name := range []string{"detection", "new", "current", "data"} {
+	for _, name := range []string{"changes", "detection", "new", "current", "data"} {
 		if raw, ok := fields[name]; ok {
 			updatePayload = raw
 			break
@@ -694,11 +623,13 @@ func decodeSatelliteUpdate(payload []byte) (model.SatelliteDetection, string, er
 		}
 	}
 	if raw, ok := patchFields["latitude"]; ok {
+		target.LatitudeText = string(raw)
 		if err := json.Unmarshal(raw, &target.Latitude); err != nil {
 			return model.SatelliteDetection{}, "", fmt.Errorf("decode satellite update latitude: %w", err)
 		}
 	}
 	if raw, ok := patchFields["longitude"]; ok {
+		target.LongitudeText = string(raw)
 		if err := json.Unmarshal(raw, &target.Longitude); err != nil {
 			return model.SatelliteDetection{}, "", fmt.Errorf("decode satellite update longitude: %w", err)
 		}
@@ -819,10 +750,10 @@ func (s *Store) loadAffectedSatelliteComponents(
 		if err := loadRows(rows); err != nil {
 			return nil, nil, err
 		}
-		for _, detection := range byKey {
-			anchors = append(anchors, detection)
-		}
 	}
+	// Existing components were already transitively closed. Only new/changed
+	// detections can connect them to another component; a removal cannot add an
+	// edge. Probing every unchanged member repeats the same historical searches.
 
 	candidates, candidateClusters, err := s.satelliteCandidates(ctx, tx, anchors)
 	if err != nil {
@@ -869,18 +800,22 @@ func (s *Store) reconcileSatelliteComponents(
 	detections []model.SatelliteDetection,
 	clusterByKey map[string]string,
 ) ([]model.HazardEvent, []model.HazardEvent, error) {
-	components, singles := model.ClusterDetections(detections)
+	components, _ := model.ClusterDetections(detections)
 
 	affectedKeys := make([]string, 0, len(detections))
 	for _, detection := range detections {
 		affectedKeys = append(affectedKeys, model.DetectionKey(detection))
 	}
-	for _, key := range affectedKeys {
-		if _, err := tx.Exec(ctx,
-			`UPDATE satellite_detections SET cluster_id=NULL WHERE detection_key=$1`,
-			key); err != nil {
-			return nil, nil, err
+	assignedKeys := make([]string, 0, len(detections))
+	for _, component := range components {
+		for _, detection := range component.Detections {
+			assignedKeys = append(assignedKeys, model.DetectionKey(detection))
 		}
+	}
+	if _, err := tx.Exec(ctx, `UPDATE satellite_detections SET cluster_id=NULL
+ WHERE detection_key=ANY($1::text[]) AND NOT(detection_key=ANY($2::text[])) AND cluster_id IS NOT NULL`,
+		affectedKeys, assignedKeys); err != nil {
+		return nil, nil, err
 	}
 
 	chosenIDs := make(map[string]bool)
@@ -935,11 +870,10 @@ func (s *Store) reconcileSatelliteComponents(
 		for _, detection := range component.Detections {
 			key := model.DetectionKey(detection)
 			keys = append(keys, key)
-			if _, err := tx.Exec(ctx,
-				`UPDATE satellite_detections SET cluster_id=$1 WHERE detection_key=$2`,
-				clusterID, key); err != nil {
-				return nil, nil, err
-			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE satellite_detections SET cluster_id=$1
+ WHERE detection_key=ANY($2::text[]) AND cluster_id IS DISTINCT FROM $1`, clusterID, keys); err != nil {
+			return nil, nil, err
 		}
 
 		_, err := tx.Exec(ctx, `
@@ -958,42 +892,35 @@ func (s *Store) reconcileSatelliteComponents(
 			return nil, nil, err
 		}
 		partition := partitionFor(string(event.Source), event.SourceRefID)
-		revision := time.Now().UnixNano()
+		revision := int64(1) // mutations are serialized by the database lease row
 		_, err = tx.Exec(ctx, `
-			INSERT INTO hazard_events (
+			INSERT INTO satellite_events (
 				hazard_id,source,source_ref_id,hazard_type,severity,
 				area_name,latitude,longitude,occurred_at,ingested_at,
 				attributes,partition_id,revision
 			)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
-			ON CONFLICT (source,source_ref_id) DO UPDATE SET
+			ON CONFLICT (source_ref_id) DO UPDATE SET
 				hazard_type=EXCLUDED.hazard_type,severity=EXCLUDED.severity,
 				area_name=EXCLUDED.area_name,latitude=EXCLUDED.latitude,
 				longitude=EXCLUDED.longitude,occurred_at=EXCLUDED.occurred_at,
 				ingested_at=EXCLUDED.ingested_at,attributes=EXCLUDED.attributes,
-				partition_id=EXCLUDED.partition_id,revision=EXCLUDED.revision
-			WHERE hazard_events.revision < EXCLUDED.revision`,
+				partition_id=EXCLUDED.partition_id,revision=satellite_events.revision+1`,
 			event.HazardID, event.Source, event.SourceRefID, event.HazardType,
 			event.Severity, event.AreaName, event.Latitude, event.Longitude,
 			event.OccuredAt, event.IngestedAt, attributes, partition, revision)
 		if err != nil {
 			return nil, nil, err
 		}
-		if err := enqueueOutboxTx(ctx, tx, "satellite", "hazard.event.upserted", event); err != nil {
-			return nil, nil, err
-		}
 		events = append(events, event)
 	}
 
-	for _, single := range singles {
-		_ = single
-	}
 	for oldID := range affectedClusterIDs {
 		if chosenIDs[oldID] {
 			continue
 		}
 		if _, err := tx.Exec(ctx,
-			`DELETE FROM hazard_events WHERE source='SATELIT' AND source_ref_id=$1`,
+			`DELETE FROM satellite_events WHERE source='SATELIT' AND source_ref_id=$1`,
 			oldID); err != nil {
 			return nil, nil, err
 		}

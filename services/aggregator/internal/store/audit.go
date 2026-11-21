@@ -113,7 +113,7 @@ func (s *Store) AuditLocation(ctx context.Context, id string) (Locations, error)
 			continue
 		}
 		op, cancel := context.WithTimeout(ctx, s.timeout)
-		rows, err := u.pool.Query(op, `SELECT h.partition_id,m.node_name FROM hazard_events h CROSS JOIN p1_metadata m WHERE h.hazard_id=$1`, id)
+		rows, err := u.pool.Query(op, `SELECT h.partition_id,m.node_name FROM hazard_events h CROSS JOIN p1_metadata m WHERE h.hazard_id=$1 AND COALESCE(h.attributes->>'_retracted','false')<>'true'`, id)
 		if err == nil {
 			for rows.Next() {
 				var partition int
@@ -181,7 +181,7 @@ func (s *Store) StorageStats(ctx context.Context) (StorageStats, error) {
 				stats.Status = "ready"
 			}
 			op, cancel := context.WithTimeout(ctx, s.timeout)
-			err := u.pool.QueryRow(op, `SELECT (SELECT node_name FROM p1_metadata WHERE singleton=true),count(*) FILTER(WHERE partition_id=$1),count(*) FILTER(WHERE partition_id<>$1) FROM hazard_events`, i).Scan(&stats.Node, &stats.Primary, &stats.Replica)
+			err := u.pool.QueryRow(op, `SELECT (SELECT node_name FROM p1_metadata WHERE singleton=true),count(*) FILTER(WHERE partition_id=$1),count(*) FILTER(WHERE partition_id<>$1) FROM hazard_events WHERE COALESCE(attributes->>'_retracted','false')<>'true'`, i).Scan(&stats.Node, &stats.Primary, &stats.Replica)
 			cancel()
 			if err != nil {
 				if budgetError(err) {
