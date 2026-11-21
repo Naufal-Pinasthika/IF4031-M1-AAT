@@ -13,6 +13,7 @@ runbooks remain outside it; start with the [documentation index](../README.md).
 - [P2 read-path implementation](P2-read-path-implementation.md)
 - [P5 measurement and observability](P5-observability.md)
 - [P3/P4 durable ingress and stream processing](P3-P4-ingress.md)
+- [P1 practice verification](P1-verification.md)
 
 These notes retain their original scope and verification limits; placing them
 here does not establish a new acceptance pass.
