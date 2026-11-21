@@ -54,10 +54,16 @@ func main() {
 	mux.HandleFunc("POST /v1/token/refresh", authHandler.Refresh)
 	mux.HandleFunc("GET /.well-known/jwks.json", authHandler.JWKS)
 	mux.HandleFunc("GET /health", authHandler.Health)
+	fieldSecret := ""
+	for _, client := range cfg.Clients {
+		if client.ID == cfg.FieldClientID {
+			fieldSecret = client.Secret
+		}
+	}
 
 	server := &http.Server{
 		Addr:              cfg.ListenAddress,
-		Handler:           telemetry.Wrap(handler.Logging(logger, handler.Limit(cfg.MaxInFlight, mux)), false),
+		Handler:           telemetry.Wrap(handler.Logging(logger, handler.LimitField(cfg.MaxInFlight, cfg.FieldReservedSlots, cfg.FieldClientID, fieldSecret, mux)), false),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
