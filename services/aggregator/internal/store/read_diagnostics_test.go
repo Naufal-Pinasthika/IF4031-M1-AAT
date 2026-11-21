@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/correlation"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func TestReadBudgetRejectionIsNotLoggedAsElapsedTimeout(t *testing.T) {
@@ -17,6 +18,9 @@ func TestReadBudgetRejectionIsNotLoggedAsElapsedTimeout(t *testing.T) {
 	}
 	if readFailureReason(context.DeadlineExceeded) != "query_timeout" || readFailureReason(nil) != "unit_unavailable" {
 		t.Fatal("existing failure labels changed")
+	}
+	if readFailureReason(&pgconn.PgError{Code: "57014"}) != "query_timeout" || budgetError(&pgconn.PgError{Code: "42601"}) {
+		t.Fatal("server query cancellation is a budget failure; invalid SQL is not")
 	}
 }
 

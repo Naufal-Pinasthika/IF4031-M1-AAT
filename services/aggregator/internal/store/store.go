@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/config"
+	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/correlation"
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -281,8 +282,10 @@ func (s *Store) noteProbeFailure(ctx context.Context, u *unit, err error, observ
 // traffic) may turn a probe timeout into an availability-state transition.
 func budgetError(err error) bool {
 	var networkError net.Error
+	var postgresError *pgconn.PgError
 	return errors.Is(err, ErrStorageBusy) || errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) ||
+		errors.As(err, &postgresError) && postgresError.Code == "57014" ||
 		errors.As(err, &networkError) && networkError.Timeout()
 }
 
@@ -431,7 +434,36 @@ func (s *Store) UpsertAcceptedTarget(ctx context.Context, event *model.HazardEve
 
 // p1 revision guard makes copying old rows safe alongside new writes
 func (s *Store) writeRecord(ctx context.Context, u *unit, r record) error {
-	return s.writeRecords(ctx, u, []record{r})
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := s.writeRecords(ctx, u, []record{r})
+		if err == nil || attempt == 1 || ctx.Err() != nil || !retryableCanonicalWrite(err) {
+			return err
+		}
+		// A lost commit acknowledgement may already have stored this record.
+		// Retry the SAME identity, ingestion time and revision: the SQL version
+		// guard makes replay a no-op, rather than manufacturing another update.
+		s.logger.Warn("canonical_write_retry", "correlation_id", correlation.ID(ctx), "storage_unit", u.name, "attempt", attempt+1, "error", err)
+		timer := time.NewTimer(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func retryableCanonicalWrite(err error) bool {
+	var postgresError *pgconn.PgError
+	if errors.As(err, &postgresError) {
+		code := postgresError.Code
+		return code == "40001" || code == "40P01" || code == "55P03" || code == "57014" || code == "57P01" ||
+			code == "57P02" || code == "57P03" || len(code) >= 2 && code[:2] == "08"
+	}
+	return availabilityError(err)
 }
 
 // Repair pages are bounded and committed atomically, rather than paying a
@@ -461,6 +493,15 @@ func (s *Store) writeRecords(ctx context.Context, u *unit, records []record) err
 		return err
 	}
 	defer tx.Rollback(op)
+	// Client cancellation alone cannot promptly release server-side locks if
+	// the connection/commit acknowledgement is lost. Bound lock acquisition,
+	// statement execution and an abandoned transaction on PostgreSQL itself.
+	// Leave response time inside the existing client-side I/O budget.
+	milliseconds := max(int64(1), s.timeout.Milliseconds())
+	if _, err := tx.Exec(op, fmt.Sprintf("SET LOCAL lock_timeout='%dms'; SET LOCAL statement_timeout='%dms'; SET LOCAL idle_in_transaction_session_timeout='%dms'",
+		max(int64(1), milliseconds*3/4), max(int64(1), milliseconds*9/10), milliseconds)); err != nil {
+		return err
+	}
 	results := tx.SendBatch(op, batch)
 	if err := results.Close(); err != nil {
 		return err
@@ -521,6 +562,12 @@ func (s *Store) ensureSchema(ctx context.Context, u *unit) error {
  ALTER TABLE hazard_events ADD COLUMN IF NOT EXISTS ingestion_version BIGINT NOT NULL DEFAULT 0;
  CREATE INDEX IF NOT EXISTS p1_occurred ON hazard_events(partition_id,occurred_at,hazard_id);
  CREATE INDEX IF NOT EXISTS p1_ingested ON hazard_events(partition_id,ingested_at,hazard_id);
+ CREATE INDEX IF NOT EXISTS p1_analytics_live ON hazard_events(partition_id,hazard_id)
+ INCLUDE(ingestion_version,revision,hazard_type,severity,area_name,occurred_at)
+ WHERE COALESCE(attributes->'_retracted','false'::jsonb)<>'true'::jsonb;
+ CREATE INDEX IF NOT EXISTS p1_analytics_retracted ON hazard_events(partition_id,hazard_id)
+ INCLUDE(ingestion_version,revision,hazard_type,severity,area_name,occurred_at)
+ WHERE COALESCE(attributes->'_retracted','false'::jsonb)='true'::jsonb;
  CREATE TABLE IF NOT EXISTS p1_metadata (singleton BOOLEAN PRIMARY KEY DEFAULT true CHECK(singleton),
  unit_name TEXT NOT NULL,node_name TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'new',
  checkpoint TEXT NOT NULL DEFAULT '',copied BIGINT NOT NULL DEFAULT 0);
