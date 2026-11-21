@@ -182,7 +182,7 @@ class Harness:
             raw = response.read_bytes()
         record = {'service': service, 'method': method, 'path': path, **timing, 'correlation_id': correlation}
         if not private:
-            name = f'{len(self.report["requests"]):04d}-response.json'
+            name = f'{len(self.report["requests"]):04d}-{correlation.rsplit("-", 1)[-1]}-response.json'
             (self.folder / name).write_bytes(raw)
             record['response_file'] = name
         self.report['requests'].append(record)

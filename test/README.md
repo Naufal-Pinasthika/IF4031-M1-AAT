@@ -1,6 +1,6 @@
 # Report-facing system tests
 
-`p1/`, `p3/` and `p4/` contain numbered report-facing E2E scenarios, not unit tests.
+`p1/`, `p3/`, `p4/` and `p5/` contain numbered report-facing E2E scenarios, not unit tests.
 Related assertions share a workflow: schema replay includes ordering and access
 control; delivery includes idempotency and hard crashes; stream recovery includes
 clustering, mutations, burst catch-up and baseline/fault equivalence.
@@ -22,6 +22,71 @@ Never use the live coordinator or canonical database. The Go overlay runner and
 date-specific remote regression-container runner have been removed.
 
 ## Prerequisites
+
+### Tester Agent practice
+
+Run from the laptop against the VPS cluster, sequentially:
+
+```sh
+python3 test/tester-agent/00-preflight.py --vps
+python3 test/tester-agent/01-kill-leader.py --vps --allow-changes --repeat 3
+python3 test/tester-agent/02-polling-failover.py --vps --allow-changes --repeat 3
+python3 test/tester-agent/03-schema.py --vps --allow-changes --repeat 3
+```
+
+Preflight verifies the official image digest, one Ready Agent per node and
+practice discovery. `01-kill-leader` submits the official practice request,
+waits for an actual Aggregator pod identity change, records Agent logs and
+entrypoint timings, then waits for all Aggregator replicas to become Ready.
+The CLI only queues work: exit zero is not evidence that a fault happened.
+No manual repair occurs during the recovery observation window.
+
+`02-polling-failover` supplements the official scenario: it resolves the actual
+BMKG (or `--source PVMBG`) polling owner and force-deletes that exact Aggregator
+pod. It is **not** labelled an Agent-issued fault. For every affected mock it
+requires a completed poll by a new, higher-fenced owner within 60 seconds,
+independently enumerates real source records generated in the window, compares
+recent complete Audit API pages, checks one admission per immutable record in
+that window, and reconciles upstream request logs with the polling ledger and
+configured cadence. Field reads must also remain successful. Source mock IDs
+can be reused across mock restarts: historical versions from an earlier mock
+lifetime are not duplicate admissions in the current fault window.
+
+`03-schema` submits the official schema practice and verifies an actual admin
+call, new processed reports in the active compatible schema, and no application
+restart. It establishes a legacy mock baseline before the fault and restores
+the prior mode after the campaign, not during the recovery window. These are
+practice-integration assertions, not the entire incompatible-schema/replay P3
+acceptance suite. Unknown exam profiles remain deferred.
+
+PVMBG exposes a separate control listener only when
+`PVMBG_ADMIN_LISTEN_ADDRESS` is set. Kubernetes configuration enables `:8089`
+and advertises `pvmbg-admin` with `role=mock` for Agent discovery. Its
+NetworkPolicy admits Tester Agent namespace traffic to that port, but not
+ordinary application pods; node/cluster administrators retain their inherent
+privileges. The normal `pvmbg:8082` data and admin APIs still require their
+independent Bearer credential. BMKG credentials remain invalid there. Only
+PVMBG provides this schema-control API, so BMKG's data Service is not advertised
+as an administrative target. No Agent image, privileges or behavior is changed.
+Explicit schema `version` values `1`, `2`, `3` (also string forms and `v1`–`v3`)
+select legacy, additive and incompatible rename modes idempotently. Existing
+`mode` controls and the empty-body toggle remain supported; ambiguous or unknown
+versions are rejected.
+
+The `01` case proves Agent execution and pod/readiness recovery only. It does not prove
+that the killed pod owned a particular source, the ingestion takeover SLO,
+exactly-once polling, or data-loss resistance. Those require separate assertions.
+`wipe-node` is not run by these scripts and can permanently delete node data.
+Exam scenarios/keys are not inspected or required here.
+
+P5 critical-path verification has resumed. The two staged database clusters already exist
+in `sistem-informasi-kebencanaan-bnpb`, but production applications have not
+been switched to them. Kafka expansion was stopped at one Ready broker;
+the completed Kafka 4.1.2/dynamic-quorum upgrade was retained, not downgraded.
+Legacy volumes and offsets were not deleted or reset. This intermediate state
+is not a completed HA rollout and should be recorded with fault-test evidence.
+
+### General prerequisites
 
 - Run on the laptop with Python 3, cURL and an already deployed lab.
 - Keep credentials in the ignored repository `.env`, or use `--env-file`.
@@ -45,6 +110,62 @@ use the currently deployed image. It does not rebuild or deploy images.
 60-second post-burst catch-up assertion is unchanged by that budget.
 
 ## Scenarios
+
+### P5 sequence
+
+Run from the laptop (WSL for VPS access), with the lab already deployed:
+
+```sh
+python3 test/p5/00-health.py --vps --repeat 3 --seconds 60
+python3 test/p5/01-critical.py --vps --repeat 3 --seconds 60
+python3 test/p5/02-load.py --vps --mode isolation --repeat 3
+python3 test/p5/02-load.py --vps --mode priority --repeat 3
+python3 test/p5/03-recovery.py --vps --allow-changes --repeat 3
+python3 test/p5/04-circuit.py --vps --repeat 3 --seconds 30
+python3 test/p5/05-observability.py --vps --repeat 3
+python3 test/p5/05-observability.py --vps --repeat 3 --under-load
+```
+
+- `00-health`: concurrent health, statistics and metrics requests; requires a
+  Ready notifier before the window and rejects restarts or unbounded responses.
+- `01-critical`: genuine Sensor Pantai observation from the current persisted
+  cursor, per-ID notifier durability confirmation, and same-observer monotonic
+  conservative latency bounds. Only an empty unfiltered page establishes the
+  prior availability bound. No new critical samples or incomplete source
+  coverage produces **inconclusive**, not a fabricated pass. Historical alerts
+  without an availability bound are not latency samples.
+- `02-load`: k6 executes on the laptop. Isolation uses 25 BMKG and 25 PVMBG VUs
+  for 60 seconds, requires complete nonempty source-filtered responses, less
+  than 1% errors and BMKG p95 below 300 ms. Priority uses 300 Media VUs plus
+  10 Field requests/second, requiring zero Field failures, some controlled
+  Media 429s and no dropped iterations. These are P5 checks, not a replacement
+  for P2's 10,000-VU capacity benchmark. Credentials remain in process
+  environment; per-round summaries and logs stay in the private evidence folder.
+- `03-recovery`: clones the deployed notifier into one run-owned StatefulSet,
+  topic and PVC. Publishes duplicated identities, kills only that notifier's
+  PID 1 and reconciles every identity after autonomous restart. Original volumes,
+  consumer group and messages are retained. Cleanup permanently removes only
+  the temporary topic/PVC. This proves the Kafka-to-notifier component, **not**
+  source-availability latency or a full multi-component game day.
+- `04-circuit`: reads actual Aggregator upstream-request logs and samples Field
+  reads while the genuine source is unhealthy. Counts are compared with the
+  configured cooldown/polling bound. It does not manufacture source recovery;
+  outage-phase success alone does not prove automatic recovery after a real
+  source return.
+- `05-observability`: verifies actual dashboard HTML, live Prometheus series,
+  notifier scrape health and a correlation ID propagated across Client API and
+  gateway/Aggregator. `--under-load` starts the unchanged 120-second priority k6
+  workload on the laptop, waits for it to become active and retains both trace
+  and load evidence in one campaign. Each trace lookup must overlap the active
+  load; both trace coverage and workload thresholds must pass. This checks
+  data/traces, not a new visual-browser inspection. The explorer remains a
+  bounded log-tail query, not durable distributed-trace retention.
+
+Each script runs all requested rounds before reporting failed assertions where
+safe. Exit status 0 means that scenario passed, 1 failed, and 2 inconclusive.
+None starts the encrypted exam, resets source state, changes the official image
+or relaxes resource/latency limits. Check source condition and current image tags
+in the recorded deployment snapshots when comparing campaigns.
 
 | File | Responsibility | Criteria | Side effects |
 | --- | --- | --- | --- |
@@ -294,6 +415,85 @@ acknowledgement times. This second measurement includes source backlog; neither
 measurement is a source-to-notifier P5 result.
 
 ## Evidence and interpretation
+
+### P5 candidate resilience
+
+Run these from the repository root on the laptop/WSL. Candidate images must be
+imported on all three VPS nodes first. These cases create run-owned workloads,
+topics and isolated databases, then remove only those temporary resources.
+The production Sensor Pantai image, state and cursor are never reset.
+
+```bash
+python3 test/p5/06-resilience.py --vps --allow-changes \
+  --image-tag <aggregator-tag> --notifier-image-tag <notifier-tag> --repeat 3
+python3 test/p5/07-source-age.py --vps --allow-changes \
+  --image-tag <aggregator-tag> --notifier-image-tag <notifier-tag> --repeat 3 --seconds 60
+python3 test/p5/08-critical-lane.py --vps --allow-changes \
+  --image-tag <aggregator-tag> --notifier-image-tag <notifier-tag> --repeat 3
+python3 test/p5/09-notifier-failover.py --vps --allow-changes \
+  --image-tag <aggregator-tag> --notifier-image-tag <notifier-tag> --repeat 3
+python3 test/p5/10-contract.py --vps --allow-changes \
+  --image-tag <aggregator-tag> --notifier-image-tag <notifier-tag> --repeat 3
+python3 test/p5/03-recovery.py --vps --allow-changes \
+  --notifier-image-tag <notifier-tag> --repeat 3
+```
+
+`06-resilience` varies fault order, injects critical observations during faults,
+and exercises old/future source timestamp origins, including clock regression.
+Timestamp origin is not equivalent to aging the official sensor process.
+It measures each phase separately from fixture availability to durable notifier
+delivery, including recovery waiting time. Seed selects test fault scheduling
+only; application behavior must never depend on it.
+
+`07-source-age` starts an unchanged fresh official practice image and observes
+the existing long-running official source read-only. It does not write synthetic
+clock state, assume a source speed, decrypt exam data, or reset production. If
+critical coverage/availability timing is insufficient, the result is inconclusive.
+The independent observer drains at most three successful pages per sample
+until it sees an actual empty page; a short page is never assumed to be the
+tail. It stops on source errors rather than retrying them. This establishes
+an availability bound without assuming sensor speed or subtracting virtual
+timestamps from wall time. A latency upper bound above five seconds alone is
+inconclusive, not proof that the actual latency exceeded five seconds.
+
+`08-critical-lane` requires a measured ordinary Kafka backlog to remain when
+critical delivery completes. A fast response without an actual backlog is not
+proof of isolation. `03-recovery` checks crash durability; its elapsed recovery
+and latency statistics must still be compared against the five-second SLO.
+
+`09-notifier-failover` requires the prepared `notifier-ha` database cluster.
+It creates a private run-owned database, three stable notifier replicas on
+different nodes and a matching owner-only network policy. Each replica has an
+independent critical consumer group; all share one durable notification store.
+The test warms every reader, removes one notifier pod per round, and checks
+new critical deliveries, exact durable row counts and unchanged survivors.
+Replacement readers resume their committed offsets; the warm-up check uses
+the latest crash-window records rather than demanding replay of old committed
+priming records. Only temporary test workloads/databases/topics are removed.
+This does not switch the production notifier from bbolt to PostgreSQL, and
+does not establish Kafka/coordinator or node-loss HA.
+
+`10-contract` mixes seven invalid field/identity/time variants with valid
+neighbors per round. It compares the complete canonical Audit API against
+independently expected valid IDs, then verifies every invalid payload remains
+intact with reason, time and a non-retryable parked status. It does not infer
+canonical validation from notification counts alone.
+
+Both Kafka lanes preserve the general event stream. Critical events additionally
+use a separately acknowledged projection and topic (`KAFKA_CRITICAL_TOPIC`) with
+an independent consumer group. Notifier domain deduplication spans both topics.
+
+VPS load runs retain `round-<n>-field-path.log` while k6 is active, filtered to
+Field correlation IDs (including Auth issuance/refresh) and gateway
+discovery/probe failures. This avoids waiting
+until a high-volume container log has rotated before diagnosing a Field failure.
+Non-200 client diagnostics include the response error, never authorization
+headers. Field authentication attempts also retain their own correlation ID,
+status and elapsed time. Each selected pod stream must subscribe before k6
+starts; its initial old tail record is discarded. The stream drains briefly
+after k6 finishes, is
+read-only and time-bounded; business thresholds remain
+unchanged.
 
 Each run creates `.e2e/report-tests/<problem>/<case>/<UTC-run-id>/` containing
 `result.json`, deployment images/placement, HTTP response artifacts and scenario
