@@ -1,6 +1,6 @@
 # Report-facing system tests
 
-`p3/` and `p4/` contain numbered report-facing E2E scenarios, not unit tests.
+`p1/`, `p3/` and `p4/` contain numbered report-facing E2E scenarios, not unit tests.
 Related assertions share a workflow: schema replay includes ordering and access
 control; delivery includes idempotency and hard crashes; stream recovery includes
 clustering, mutations, burst catch-up and baseline/fault equivalence.
@@ -9,7 +9,12 @@ Unit and PostgreSQL integration tests live beside their services:
 
 ```sh
 go test ./services/aggregator/... ./services/client-api/...
+node --test services/client-api/cmd/server/dashboard_ui.test.cjs
 ```
+
+The dashboard's dependency-free Node tests cover DOM rendering, UTC date
+controls, partial/lagging/stale states and inert source text. They do not
+substitute for manual browser layout verification.
 
 Database integration tests require `P2_TEST_DATABASE_URL` pointing to a disposable
 PostgreSQL database with schema-creation permission. Without it, those tests skip.
@@ -43,6 +48,12 @@ use the currently deployed image. It does not rebuild or deploy images.
 
 | File | Responsibility | Criteria | Side effects |
 | --- | --- | --- | --- |
+| [p1/00-preflight.py](p1/00-preflight.py) | Storage topology, node-local disks and memory limits | Preparation | Read-only |
+| [p1/01-sharding.py](p1/01-sharding.py) | Physical placement, two copies and geographically skewed load | P1.1–2 practice | Three temporary node-local storage volumes plus isolated application/database/topic |
+| [p1/02-queries.py](p1/02-queries.py) | Global pagination and analytical totals/time filters against Audit API | P1.3, P1.7 | Same isolated setup; no original data changes |
+| [p1/03-recovery.py](p1/03-recovery.py) | Repeated empty-volume replacement, live traffic and restored replication | P1.4–7 practice | Deletes only run-owned storage PVCs; optional `--node-fault` interrupts worker B for 70s |
+| [p1/04-live-recovery.py](p1/04-live-recovery.py) | Actual canonical-volume loss, worker return and physical per-record recovery | P1.4–7 live development lab | Permanently deletes one explicitly selected original canonical PVC on a worker; stops its k3s/containers for 70s; retains unrelated PVCs |
+| [p1/05-analytics.py](p1/05-analytics.py) | Repeated live all-history/time-range analytics, request budget and aggregate integrity | P1.7 | Read-only; does not replace the isolated Audit comparison or manual chart inspection |
 | [p3/00-preflight.py](p3/00-preflight.py) | API/configuration/topology prerequisites | Preparation | Read-only |
 | [p3/01-schema.py](p3/01-schema.py) | Declared schema-acceptance policy | P3.1 | Temporarily selects adapter v1 and PVMBG modes |
 | [p3/02-poison.py](p3/02-poison.py) | Poison isolation and intact retention | P3.2–3 | Repeats four malformed PVMBG modes |
@@ -54,6 +65,147 @@ use the currently deployed image. It does not rebuild or deploy images.
 | [p4/02-recovery.py](p4/02-recovery.py) | Full-input oracle, updates/retractions, catch-up, reconnect and baseline/fault equivalence | P4.1–5, P4.8 | Temporary VPS applications/databases/topic; kills only their stream owner |
 | [p4/03-audit.py](p4/03-audit.py) | Canonical wildfire snapshot/invariants | P4.1 | Read-only; not a reference comparison |
 | [p4/04-dashboard.py](p4/04-dashboard.py) | Real dashboard HTML and measured Prometheus panel data | P4.4 | Private loopback port-forward; read-only |
+
+### P1 sequence
+
+```sh
+python3 test/p1/00-preflight.py --vps
+python3 test/p1/01-sharding.py --vps --allow-changes --repeat 3 --records 300
+python3 test/p1/02-queries.py --vps --allow-changes --repeat 3
+python3 test/p1/03-recovery.py --vps --allow-changes --repeat 3
+python3 test/p1/05-analytics.py --vps --repeat 5
+```
+
+The P1 sandbox clones the deployed PostgreSQL StatefulSet templates into three
+new, run-labelled local PVCs on A/B/C. Application images and memory limits are
+unchanged. Original canonical PVCs are never fault targets. A private two-replica
+gateway fronts three Aggregators; the temporary Client API uses that gateway.
+The coordinator gets only a temporary database. Cleanup permanently removes the
+temporary data, after checking ownership labels and exact claim names.
+
+`01-sharding` measures CPU/memory during import and physical primary/replica
+counts before/after the catalog and concentrated regional burst. Its input is
+explicitly labelled practice data, not the later assistant catalog. Physical
+copies, audit locations, checksums and aggregates are independently checked.
+Short-run Kubernetes CPU samples have metrics-server sampling resolution; they
+are not a capacity benchmark. `02-queries` checks every page, including time ties,
+and all five hazard types plus severity, area and UTC daily totals/range filters.
+
+For an actual worker interruption, obtain a dedicated maintenance window first:
+
+```sh
+python3 test/p1/03-recovery.py --vps --allow-changes --node-fault --repeat 3
+```
+
+This stops k3s and its containers on **worker B**, not the control plane, with a
+systemd timer that restarts k3s-agent after 70 seconds. Other applications on B
+are affected temporarily, including the official Tester Agent as a consequence
+of the node outage; its manifest, permissions and image are not modified.
+Only the temporary canonical volume is erased. No whole VPS disk or original
+application volume is erased. The ordinary mode instead alternates temporary
+disk loss on B and C, without stopping either node. Report these fault scopes
+precisely; neither run establishes control-plane/coordinator failure tolerance.
+
+Reads and analytical requests are exercised across fault injection and empty-disk
+bootstrap. They must return 200 within the declared five-second test bound;
+partial responses must name unavailable units. The importer acknowledges only
+fully replicated writes: while one destination is missing it may return 503
+with accepted/failed counts, not falsely acknowledge full replication. Such
+ambiguous writes are retried after repair with the same identities, and the
+final audit/physical comparison must recover two copies of every input record.
+No SQL repair, manual data copy, or Aggregator restart is permitted to make the
+replacement recover. Kubernetes recreates the volume/pod; application recovery
+must restore its contents while traffic continues.
+
+Worker return has a separate 120-second test bound, with the transient timer's
+`AccuracySec=1s` explicitly set; node Ready/NotReady transitions are retained.
+Existing event identity and complete contents must match before any write retry.
+Only new/ambiguous fault-window writes are retried afterward; old acknowledged
+data is never re-imported to make a recovery assertion pass.
+
+### Original VPS database recovery
+
+`04-live-recovery` is destructive and must run only with explicit authorization
+in a dedicated maintenance window. Inspect the actual pod placement first:
+`postgres-a` is a unit name, not a guarantee that it runs on node A. The selected
+claim must currently belong to the selected **worker**, never the control plane.
+
+```sh
+python3 test/p1/04-live-recovery.py --vps --allow-changes \
+  --worker aat-vps-b --claim data-postgres-a-0
+```
+
+The script captures a physical manifest for every canonical row, including
+tombstones, ingestion version, revision and a full-row MD5 fingerprint. Before
+deletion it requires two intact/equal-or-newer copies of every baseline event.
+The manifest has a SHA-256 summary; it is not the assistant's reference checksum
+and is not a backup of database contents. Comparison allows only legitimately
+newer versions while the real feeds continue to run.
+The three captures are not an atomic distributed snapshot. For versions that
+changed during capture, a separate 120-second safety gate rechecks only the
+affected identities against the **unchanged** baseline version and fingerprint.
+It never lowers a baseline version or deletes a volume with an unverified row.
+
+One live PVC is deleted through Kubernetes and the exact old node-local data
+directory must disappear. A systemd timer restarts the worker's k3s-agent after
+70 seconds. OS, SSH, unrelated data volumes and Tester Agent configuration are
+retained. The test checks surviving copies, recreates the StatefulSet replica on
+an empty PVC and observes automatic application repair without SQL data repair
+or re-importing old events. New, clearly labelled practice records are written
+during recovery; only those new ambiguous inputs are retried afterward.
+
+The default repair observation budget is 1,200 seconds for the existing live
+dataset, distinct from the worker's 70-second automatic restart and the sampled
+five-second API response bound. The test preserves API failures independently
+of data recovery and fails overall if any sampled API does not meet that bound.
+Its SQLite comparison ledger performs index I/O in a temporary local database,
+then writes an evidence copy; it does not create tables in application storage.
+An independent observer uses its own SSH tunnel, authentication state and result
+directory. It continuously samples event, Audit and analytical reads throughout
+volume deletion, worker interruption, manifest comparison and empty-disk repair;
+blocking administrative commands do not suspend that sampling. Each sample
+retains UTC start/end times, correlation ID, latency and complete/partial status.
+Physical COPY captures use independent, bounded SSH channels rather than leaving
+an abandoned capture attached to a persistent SSH master.
+Write observation continues after a rejected or ambiguous POST. HTTP 200 counts
+as an acknowledgement only with `accepted=1, failed=0`. A 503 with per-item
+failure counts or the gateway's `backend_unavailable` error is not an
+acknowledgement: the input may already have committed on one destination. Other
+responses are retained as failures, but do not stop read observation or worker
+restoration. Only new fault-window identities are retried after the original
+baseline has regained two physical copies.
+No original application volume is deleted unless all pre-destruction safety
+checks pass. An interrupted preflight is not a successful fault/recovery run.
+
+If local evidence collection was interrupted after the volume was replaced,
+verify the retained baseline without repeating a destructive action:
+
+```sh
+python3 test/p1/04-live-recovery.py --vps \
+  --worker aat-vps-b --claim data-postgres-a-0 \
+  --verify-run .e2e/report-tests/p1/04-live-recovery/<original-run>
+```
+
+This mode reconstructs the original baseline and requires its count and SHA-256
+to match the original manifest summary before comparing all current physical
+copies. It also verifies the new PVC identity and preservation of unrelated
+volumes and Tester Agent identity. It performs no cluster mutation. It cannot
+retroactively prove every response during a missing observation window; the
+original window remains inconclusive even when final data recovery is proved.
+Allow sufficient free disk space for manifests, the SQLite comparison and its
+evidence copy; the live scenario requires at least 4 GiB free before proceeding.
+A larger dataset may require more. A local disk I/O failure is an observer failure, not evidence of
+application data loss or a passing recovery window.
+
+The assistant catalog/checksum comparison stays separate until those resources
+are released. Practice success is not labelled an assistant-checksum pass.
+
+After every campaign has cleaned up, run `p1/00-preflight.py --vps --baseline
+<earlier-baseline.json>` to compare the original PVC UIDs and Tester Agent UID,
+and verify no temporary applications or volume claims remain. The baseline is
+created by the initial preflight under its private evidence directory. The
+client test harness renews tokens using `expires_in` before they expire; raw
+unexpected 401 responses and the subsequent reauthentication remain recorded.
 
 ### P3 sequence
 

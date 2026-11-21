@@ -1,39 +1,175 @@
 <!doctype html>
-<!-- p1: browser analytics uses the authorized Client API, without embedded secrets. -->
 <html lang="id">
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BNPB · Analitik Bencana</title>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Analitik kejadian · BNPB</title>
 <style>
-:root{font:16px system-ui,sans-serif;color:#162f46;background:#edf2f5}*{box-sizing:border-box}body{max-width:1180px;margin:auto;padding:28px}header{border-bottom:3px solid #df6b36;padding-bottom:18px}h1{font-size:30px;margin:4px 0}h2{font-size:20px;margin-top:0}.sub{color:#52687b}section{background:white;border:1px solid #d4dfe7;border-radius:8px;padding:22px;margin-top:20px}form{display:flex;gap:14px;align-items:end;flex-wrap:wrap}label{display:grid;gap:5px;font-size:14px}input,button{font:inherit;padding:9px;border:1px solid #a1b3c1;border-radius:4px}input[type=password]{width:300px;max-width:100%}button{background:#194d70;color:white;cursor:pointer}button:disabled{opacity:.6}#status{padding:14px;margin-top:18px;background:#e1eaf0;border-left:5px solid #697e90}#status.warn{background:#fff0cd;border-color:#c45c00;color:#6c3600}#status.ok{background:#e1f3eb;border-color:#287450}#legend{display:flex;flex-wrap:wrap;gap:18px;font-size:14px}.swatch{display:inline-block;width:14px;height:4px;margin-right:6px;vertical-align:middle}svg{width:100%;height:auto;min-height:200px}text{font:12px system-ui;fill:#52687b}.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}.grid section{min-width:0}table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:9px;border-bottom:1px solid #e2e9ee}th:last-child,td:last-child{text-align:right}.scroll{max-height:360px;overflow:auto}#total{font-size:27px;font-weight:700}@media(max-width:700px){.grid{grid-template-columns:1fr}body{padding:16px}}
+:root{color-scheme:dark;font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#d8d9df;background:#111217;--panel:#181b1f;--border:#2c3037;--muted:#999fa9;--orange:#ff9830}
+*{box-sizing:border-box}body{margin:0}button,input{font:inherit}a{color:inherit;text-decoration:none}button,a,input{outline-offset:3px}button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid #5794f2}button{cursor:pointer}button:disabled{cursor:wait;opacity:.65}
+.rail{position:fixed;inset:0 auto 0 0;width:56px;background:#181b1f;border-right:1px solid var(--border);display:flex;align-items:center;flex-direction:column;gap:10px;padding:15px 0;z-index:2}.brand{display:grid;place-items:center;width:30px;height:30px;background:var(--orange);color:#111217;font-size:18px;font-weight:750;margin-bottom:20px;border-radius:3px}.rail a{display:grid;place-items:center;width:38px;height:38px;color:var(--muted);border-radius:3px}.rail a:hover{background:#262b33;color:#fff}.rail a:first-of-type{color:var(--orange);background:#ff983012}.rail svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6}.rail-caption{margin-top:auto;font:10px ui-monospace,monospace;color:var(--muted);writing-mode:vertical-rl;letter-spacing:2px}
+.shell{margin-left:56px}.topbar{height:48px;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 24px;border-bottom:1px solid var(--border);font-size:12px}.breadcrumbs{display:flex;align-items:center;gap:12px;color:var(--muted)}.breadcrumbs span:last-child{color:#d8d9df}.separator{color:#58606c}.tag{font:11px ui-monospace,SFMono-Regular,monospace;color:var(--muted);border:1px solid var(--border);padding:3px 6px;border-radius:2px}
+main{max-width:1680px;margin:auto;padding:20px 24px 16px}.heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}h1{font-size:21px;font-weight:500;margin:0}.heading p{font-size:12px;color:var(--muted);margin:6px 0 0}.status-badge{display:inline-flex;align-items:center;gap:7px;font-size:12px;white-space:nowrap;color:var(--muted)}.status-badge:before{content:"";width:6px;height:6px;background:currentColor;border-radius:50%}.status-badge.ok{color:#73bf69}.status-badge.warn{color:#ffbc70}
+.toolbar{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;padding-bottom:12px}.toolbar label{display:grid;gap:6px;color:var(--muted);font-size:11px}.token-field{flex:1;min-width:220px;max-width:380px}.toolbar input{height:33px;background:#0b0c0e;color:#d8d9df;border:1px solid #3b4049;padding:6px 9px;border-radius:2px;min-width:0;width:100%}.toolbar input::placeholder{color:#747b87}.toolbar input:focus{border-color:#5794f2}.toolbar input[type=date]{width:156px}.refresh{display:flex;align-items:center;justify-content:center;gap:7px;height:33px;border:1px solid #4b525e;border-radius:2px;background:#262b33;color:#e4e7eb;padding:0 14px}.refresh:hover{background:#343b46}.refresh svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.7}.auth-note{font-size:11px;color:#838b98;margin:0 0 12px}.message{display:flex;align-items:center;gap:8px;min-height:32px;padding:7px 10px;border:1px solid var(--border);border-left:2px solid #626c7c;background:#16191e;color:var(--muted);font-size:12px;margin-bottom:12px}.message.ok{border-left-color:#73bf69}.message.warn{border-left-color:#ff9830;color:#ffcb91;background:#211c17}
+.stats{display:grid;grid-template-columns:2fr 1fr 1fr;gap:12px;margin-bottom:12px}.panel{background:var(--panel);border:1px solid var(--border);border-radius:3px;min-width:0;scroll-margin-top:12px}.stat{padding:14px 16px;min-height:102px}.stat-label{font-size:12px;color:#b5b9c3;margin:0 0 8px}.stat-value{font-size:32px;line-height:1.1;font-weight:500;letter-spacing:-.6px;font-variant-numeric:tabular-nums}.stat-detail{font-size:11px;color:var(--muted);margin-left:10px}.critical{color:#f2495c}.panels[data-stale=true] .stat-value{opacity:.55}.panel-header{min-height:43px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 14px;border-bottom:1px solid #252a31}.panel-header h2{font-size:13px;font-weight:500;margin:0}.panel-meta{font-size:11px;color:var(--muted);white-space:nowrap}.chart-panel{margin-bottom:12px}.chart-body{padding:12px 14px 6px}.chart-body>svg{display:block;width:100%;height:auto;min-height:190px;max-height:320px;overflow:visible}svg text{font:11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:#929aa8}.legend{display:flex;flex-wrap:wrap;column-gap:22px;row-gap:8px;padding:8px 10px 12px;font-size:11px}.legend-item{display:flex;align-items:center;gap:7px}.swatch{width:14px;height:3px;border-radius:1px}.legend-value{color:var(--muted);font-variant-numeric:tabular-nums;margin-left:4px}.lower{display:grid;grid-template-columns:1fr 1.5fr;gap:12px}.panel-table{width:100%;border-collapse:collapse;font-size:12px}.panel-table th{position:sticky;top:0;background:#202328;text-align:left;color:var(--muted);font-weight:400;font-size:11px;padding:8px 14px;border-bottom:1px solid var(--border)}.panel-table td{padding:10px 14px;border-bottom:1px solid #252a31}.panel-table tr:last-child td{border-bottom:0}.panel-table th:last-child,.panel-table td:last-child{text-align:right;font-variant-numeric:tabular-nums}.panel-table tbody tr:hover{background:#20242b}.table-scroll{max-height:243px;overflow:auto;scrollbar-color:#414752 #181b1f}.empty-cell{height:130px;text-align:center!important;color:#737d8c}.severity-name{display:flex;align-items:center;gap:8px}.severity-dot{height:6px;width:6px;border-radius:1px;flex-shrink:0}.area-label{display:block;min-width:110px}.bar-track{height:3px;background:#282e37;margin-top:7px;max-width:360px}.bar-fill{height:100%;background:#5794f2}.footer{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:#7f8795;font-size:11px;margin-top:14px}.footer span{font-variant-numeric:tabular-nums}code{font:11px ui-monospace,SFMono-Regular,monospace;color:#999fa9}
+@media(min-width:1500px){.chart-body>svg{max-height:360px}}@media(max-width:850px){main{padding:18px 14px}.topbar{padding:0 14px}.lower{grid-template-columns:1fr 1fr}.token-field{max-width:none;flex-basis:100%}.chart-body>svg{min-height:160px}.stats{grid-template-columns:1.5fr 1fr 1fr}.stat{padding:12px}.stat-value{font-size:27px}.stat-detail{display:block;margin:6px 0 0}}@media(max-width:540px){.rail{display:none}.shell{margin-left:0}.topbar{height:42px}.breadcrumbs{gap:8px}.topbar>.tag{display:none}.heading{align-items:flex-start}h1{font-size:18px}.heading p{font-size:11px;max-width:220px}.status-badge{font-size:11px}.toolbar label:not(.token-field){flex:1}.toolbar input[type=date]{width:100%}.refresh{width:100%;margin-top:4px}.stats{gap:8px;grid-template-columns:1fr 1fr}.stats .stat:first-child{grid-column:1/-1;min-height:94px}.stat{min-height:85px}.stat-value{font-size:28px}.stat-detail{display:inline;margin-left:7px}.lower{grid-template-columns:1fr}.panel-meta{font-size:10px}.chart-body{padding:8px 4px}.legend{column-gap:14px}.chart-body>svg{min-height:130px}}
+.chart-body>svg{height:250px;min-height:0;max-height:none}
+@media(min-width:1500px){.chart-body>svg{height:300px}}@media(max-width:850px){.chart-body>svg{height:220px}}@media(max-width:540px){.chart-body>svg{height:200px}}
 </style>
-<header><p class="sub">BNPB / SISTEM INFORMASI KEBENCANAAN</p><h1>Analitik kejadian bencana</h1><div class="sub">Seluruh lokasi penyimpanan · Waktu UTC · Setiap event dihitung satu kali</div></header>
-<section><form id="controls"><label>Access token Client API<input id="token" type="password" autocomplete="off" required placeholder="Token dengan hazards:read:summary"></label><label>Dari tanggal UTC<input id="from" type="date"></label><label>Sampai tanggal UTC<input id="to" type="date"></label><button id="load">Tampilkan</button></form><p class="sub">Token hanya disimpan di memori halaman. Gunakan access token baru jika sesi kedaluwarsa.</p></section>
-<div id="status" role="status" aria-live="polite">Belum ada data. Masukkan token untuk memuat analitik.</div>
-<section><h2>Jumlah kejadian <span id="total">—</span></h2><p class="sub" id="updated">—</p><div id="legend"></div><svg id="chart" viewBox="0 0 1000 320" role="img" aria-label="Jumlah kejadian harian per jenis bahaya"></svg></section>
-<div class="grid"><section><h2>Jumlah per tingkat severity</h2><table><thead><tr><th>Severity</th><th>Kejadian</th></tr></thead><tbody id="severity"></tbody></table></section><section><h2>Jumlah per wilayah</h2><div class="scroll"><table><thead><tr><th>Wilayah</th><th>Kejadian</th></tr></thead><tbody id="areas"></tbody></table></div></section></div>
+</head>
+<body>
+<aside class="rail" aria-label="Navigasi dashboard">
+  <div class="brand" aria-label="BNPB">B</div>
+  <a href="#overview" aria-label="Ringkasan" title="Ringkasan"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg></a>
+  <a href="#trend" aria-label="Tren kejadian" title="Tren kejadian"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3v18h18M5 16l5-7 4 4 6-8"/></svg></a>
+  <a href="#distribution" aria-label="Distribusi kejadian" title="Distribusi kejadian"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16M4 10h11M4 16h7M4 22h16"/></svg></a>
+  <span class="rail-caption">BNPB / ANALYTICS</span>
+</aside>
+<div class="shell">
+  <header class="topbar"><nav class="breadcrumbs" aria-label="Breadcrumb"><span>BNPB</span><span class="separator">/</span><span>Dashboards</span><span class="separator">/</span><span>Analitik kejadian</span></nav><span class="tag">UTC</span></header>
+  <main id="overview">
+    <div class="heading"><div><h1>Analitik kejadian</h1><p>HazardEvent · Seluruh lokasi penyimpanan</p></div><span id="connection" class="status-badge">Belum dimuat</span></div>
+    <form id="controls" class="toolbar">
+      <label class="token-field">Token Client API<input id="token" type="password" autocomplete="off" spellcheck="false" required placeholder="Access token · hazards:read:summary"></label>
+      <label>Dari · UTC<input id="from" type="date"></label>
+      <label>Sampai · UTC<input id="to" type="date"></label>
+      <button id="load" class="refresh" type="submit"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 8a6 6 0 1 0 0 5M16 3v5h-5"/></svg><span id="load-label">Refresh</span></button>
+    </form>
+    <p class="auth-note">Kosongkan tanggal untuk seluruh riwayat. Token hanya digunakan di halaman ini, tidak disimpan ke browser.</p>
+    <div id="status" class="message" role="status" aria-live="polite">Masukkan access token untuk memuat data.</div>
+    <div id="panels" class="panels" data-stale="false" aria-busy="false">
+      <div class="stats">
+        <section class="panel stat" aria-label="Total kejadian"><h2 class="stat-label">Total kejadian</h2><span id="total" class="stat-value">—</span><span class="stat-detail">event unik</span></section>
+        <section class="panel stat" aria-label="Kejadian tingkat AWAS"><h2 class="stat-label">Severity AWAS</h2><span id="critical" class="stat-value critical">—</span><span class="stat-detail">kejadian</span></section>
+        <section class="panel stat" aria-label="Jumlah wilayah"><h2 class="stat-label">Wilayah tercatat</h2><span id="area-count" class="stat-value">—</span><span class="stat-detail">area</span></section>
+      </div>
+      <section id="trend" class="panel chart-panel">
+        <div class="panel-header"><h2>Kejadian per jenis bahaya</h2><span class="panel-meta">Time series / harian / UTC</span></div>
+        <div class="chart-body"><svg id="chart" viewBox="0 0 1100 250" role="img" aria-label="Jumlah kejadian harian untuk lima jenis bahaya"><text x="550" y="120" text-anchor="middle">Belum ada data yang dimuat</text></svg><div id="legend" class="legend"></div></div>
+      </section>
+      <div id="distribution" class="lower">
+        <section class="panel"><div class="panel-header"><h2>Distribusi severity</h2><span class="panel-meta">Jumlah kejadian</span></div><div class="table-scroll"><table class="panel-table"><thead><tr><th scope="col">Severity</th><th scope="col">Kejadian</th></tr></thead><tbody id="severity"><tr><td class="empty-cell" colspan="2">Belum ada data</td></tr></tbody></table></div></section>
+        <section class="panel"><div class="panel-header"><h2>Kejadian per wilayah</h2><span class="panel-meta">area_name</span></div><div class="table-scroll"><table class="panel-table"><thead><tr><th scope="col">Wilayah</th><th scope="col">Kejadian</th></tr></thead><tbody id="areas"><tr><td class="empty-cell" colspan="2">Belum ada data</td></tr></tbody></table></div></section>
+      </div>
+    </div>
+    <footer class="footer"><span id="updated">Terakhir diperbarui: —</span><span id="timing">Client API <code>/analytics</code></span></footer>
+  </main>
+</div>
 <script>
-// p1: DOM text nodes keep source area names out of executable HTML.
 const $ = id => document.getElementById(id);
-const types = ['SEISMIC','TSUNAMI','VOLCANIC','WILDFIRE','COASTAL'];
-const names = ['Gempa','Tsunami','Gunung berapi','Kebakaran hutan','Pesisir'];
-const colors = ['#1261a0','#843ba5','#c54e26','#b18a00','#168071'];
-for(let i=0;i<types.length;i++){const label=document.createElement('span'),swatch=document.createElement('span');swatch.className='swatch';swatch.style.background=colors[i];label.append(swatch,document.createTextNode(names[i]));$('legend').append(label);}
-// p1
-function table(id,counts){const target=$(id);target.replaceChildren();for(const [name,count] of Object.entries(counts).sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0]))){const tr=document.createElement('tr');for(const value of [name,count]){const td=document.createElement('td');td.textContent=String(value);tr.append(td);}target.append(tr);}}
-// p1
-function svgElement(tag,attrs,text){const node=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [key,value]of Object.entries(attrs))node.setAttribute(key,String(value));if(text!==undefined)node.textContent=text;return node;}
-// p1: fill missing UTC days with zeros; server supplies only occupied daily buckets.
-function draw(daily){const svg=$('chart');svg.replaceChildren();if(!daily.length){svg.append(svgElement('text',{x:60,y:150},'Tidak ada kejadian pada rentang ini.'));return;}
- const byDate=new Map(daily.map(d=>[d.date,d.counts]));const first=Date.parse(daily[0].date+'T00:00:00Z'),last=Date.parse(daily[daily.length-1].date+'T00:00:00Z');const days=[];for(let t=first;t<=last;t+=86400000){const date=new Date(t).toISOString().slice(0,10);days.push({date,counts:byDate.get(date)||{}});}
- const max=Math.max(1,...daily.flatMap(d=>types.map(type=>d.counts[type]||0)));const x=i=>60+i*900/Math.max(1,days.length-1),y=n=>270-n*230/max;
- for(let i=0;i<=4;i++){const value=max*i/4;svg.append(svgElement('line',{x1:60,y1:y(value),x2:960,y2:y(value),stroke:'#dfe7ed'}),svgElement('text',{x:50,y:y(value)+4,'text-anchor':'end'},value.toFixed(value%1?1:0)));}
- for(let k=0;k<types.length;k++){svg.append(svgElement('polyline',{points:days.map((d,i)=>`${x(i)},${y(d.counts[types[k]]||0)}`).join(' '),fill:'none',stroke:colors[k],'stroke-width':2}));if(days.length===1)svg.append(svgElement('circle',{cx:x(0),cy:y(days[0].counts[types[k]]||0),r:4,fill:colors[k]}));}
- for(const i of [...new Set([0,Math.floor((days.length-1)/2),days.length-1])])svg.append(svgElement('text',{x:x(i),y:300,'text-anchor':i===0?'start':i===days.length-1?'end':'middle'},days[i].date));
+const types = ['SEISMIC', 'TSUNAMI', 'VOLCANIC', 'WILDFIRE', 'COASTAL'];
+const names = ['Gempa', 'Tsunami', 'Gunung berapi', 'Kebakaran hutan', 'Pesisir'];
+const colors = ['#73bf69', '#5794f2', '#ff9830', '#b877d9', '#f2cc0c'];
+const severityColors = {NORMAL: '#73bf69', WASPADA: '#f2cc0c', SIAGA: '#ff9830', AWAS: '#f2495c'};
+const number = value => new Intl.NumberFormat('id-ID').format(value);
+let hasData = false, currentDaily = null;
+
+for (let i = 0; i < types.length; i++) {
+  const item = document.createElement('span'), swatch = document.createElement('span'), value = document.createElement('span');
+  item.className = 'legend-item'; swatch.className = 'swatch'; swatch.style.background = colors[i];
+  value.className = 'legend-value'; value.id = 'legend-' + types[i]; value.textContent = '—';
+  item.append(swatch, document.createTextNode(names[i]), value); $('legend').append(item);
 }
-// p1: a failed fetch leaves previous values visibly marked as stale, never converted to zeros.
-$('controls').addEventListener('submit',async event=>{event.preventDefault();$('load').disabled=true;const status=$('status');status.className='warn';status.textContent='Memuat data; angka sebelumnya belum diperbarui.';
- try{const params=new URLSearchParams();if($('from').value)params.set('from',$('from').value+'T00:00:00Z');if($('to').value)params.set('to',$('to').value+'T23:59:59.999999999Z');const response=await fetch('/analytics?'+params,{headers:{Authorization:'Bearer '+$('token').value.trim()},cache:'no-store',signal:AbortSignal.timeout(30000)});if(!response.ok)throw new Error('HTTP '+response.status);const data=await response.json();if(!Array.isArray(data.daily)||!data.by_severity||!data.by_area||typeof data.partial!=='boolean')throw new Error('Respons analitik tidak valid');
- $('total').textContent=data.total;$('updated').textContent='Diperbarui '+new Date().toISOString()+' · Angka dapat berubah selama ingestion berjalan.';table('severity',data.by_severity);table('areas',data.by_area);draw(data.daily);status.className=data.partial?'warn':'ok';status.textContent=data.partial?'PERINGATAN: penyimpanan degraded; angka mungkin belum lengkap. Unit tidak tersedia/pulih: '+(data.unavailable_units||[]).join(', '):'Seluruh unit penyimpanan tersedia.';
- }catch(error){status.className='warn';status.textContent='Gagal memuat analitik ('+error.message+'). Angka yang masih tampil adalah hasil sebelumnya, bukan data terkini.';}finally{$('load').disabled=false;}});
+
+function table(id, counts) {
+  const target = $(id), entries = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  let maximum = 1;
+  for (const [, count] of entries) maximum = Math.max(maximum, count);
+  target.replaceChildren();
+  if (!entries.length) {
+    const row = document.createElement('tr'), cell = document.createElement('td');
+    cell.colSpan = 2; cell.className = 'empty-cell'; cell.textContent = 'Tidak ada kejadian pada rentang ini.';
+    row.append(cell); target.append(row); return;
+  }
+  for (const [name, count] of entries) {
+    const row = document.createElement('tr'), label = document.createElement('td'), value = document.createElement('td');
+    const text = document.createElement('span'); text.textContent = name;
+    if (id === 'severity') {
+      const dot = document.createElement('span'); dot.className = 'severity-dot'; dot.style.background = severityColors[name] || '#999fa9'; dot.setAttribute('aria-hidden', 'true');
+      const group = document.createElement('span'); group.className = 'severity-name'; group.append(dot, text); label.append(group);
+    } else {
+      text.className = 'area-label';
+      const track = document.createElement('div'), bar = document.createElement('div');
+      track.className = 'bar-track'; track.setAttribute('aria-hidden', 'true'); bar.className = 'bar-fill'; bar.style.width = (count / maximum * 100) + '%';
+      track.append(bar); label.append(text, track);
+    }
+    value.textContent = number(count); row.append(label, value); target.append(row);
+  }
+}
+
+function svgElement(tag, attrs, text) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function draw(daily) {
+  const svg = $('chart'), width = svg.clientWidth || 1100, height = svg.clientHeight || 250;
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`); svg.replaceChildren();
+  if (!daily || !daily.length) { svg.append(svgElement('text', {x: width / 2, y: height / 2, 'text-anchor': 'middle'}, daily ? 'Tidak ada kejadian pada rentang ini.' : 'Belum ada data yang dimuat')); return; }
+  const byDate = new Map(daily.map(day => [day.date, day.counts]));
+  const first = Date.parse(daily[0].date + 'T00:00:00Z'), last = Date.parse(daily[daily.length - 1].date + 'T00:00:00Z');
+  const days = [];
+  for (let time = first; time <= last; time += 86400000) {
+    const date = new Date(time).toISOString().slice(0, 10); days.push({date, counts: byDate.get(date) || {}});
+  }
+  let maximum = 1;
+  for (const day of daily) for (const type of types) maximum = Math.max(maximum, day.counts[type] || 0);
+  const ticks = Math.min(4, maximum), ceiling = Math.ceil(maximum / ticks) * ticks;
+  const x = i => days.length === 1 ? 65 + (width - 80) / 2 : 65 + i * (width - 80) / (days.length - 1), y = n => height - 40 - n * (height - 60) / ceiling;
+  for (let i = 0; i <= ticks; i++) {
+    const value = ceiling * i / ticks;
+    svg.append(svgElement('line', {x1: 65, y1: y(value), x2: width - 15, y2: y(value), stroke: '#30343c', 'stroke-width': 1}), svgElement('text', {x: 55, y: y(value) + 4, 'text-anchor': 'end'}, number(value)));
+  }
+  for (let k = 0; k < types.length; k++) {
+    const line = svgElement('polyline', {points: days.map((day, i) => `${x(i)},${y(day.counts[types[k]] || 0)}`).join(' '), fill: 'none', stroke: colors[k], 'stroke-width': 1.8, 'stroke-linejoin': 'round'});
+    line.append(svgElement('title', {}, names[k])); svg.append(line);
+    if (days.length === 1) svg.append(svgElement('circle', {cx: x(0), cy: y(days[0].counts[types[k]] || 0), r: 3, fill: colors[k]}));
+  }
+  const labels = [...new Set([0, Math.floor((days.length - 1) / 2), days.length - 1])];
+  for (const i of labels) svg.append(svgElement('text', {x: x(i), y: height - 15, 'text-anchor': days.length === 1 ? 'middle' : i === 0 ? 'start' : i === days.length - 1 ? 'end' : 'middle'}, days[i].date));
+}
+
+draw(null);
+if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => draw(currentDaily)).observe($('chart'));
+
+function setStatus(state, badge, message) {
+  $('connection').className = 'status-badge ' + state; $('connection').textContent = badge;
+  $('status').className = 'message ' + state; $('status').textContent = message;
+}
+
+$('controls').addEventListener('submit', async event => {
+  event.preventDefault();
+  if ($('from').value && $('to').value && $('from').value > $('to').value) { setStatus('warn', 'Rentang tidak valid', 'Tanggal awal tidak boleh melewati tanggal akhir.'); return; }
+  $('load').disabled = true; $('load-label').textContent = 'Memuat…'; $('panels').setAttribute('aria-busy', 'true'); $('panels').dataset.stale = String(hasData);
+  setStatus('', 'Memuat', hasData ? 'Memuat data. Angka yang tampil masih berasal dari permintaan sebelumnya.' : 'Mengambil agregasi dari seluruh lokasi penyimpanan…');
+  const started = performance.now();
+  try {
+    const params = new URLSearchParams();
+    if ($('from').value) params.set('from', $('from').value + 'T00:00:00Z');
+    if ($('to').value) params.set('to', $('to').value + 'T23:59:59.999999999Z');
+    const response = await fetch('/analytics?' + params, {headers: {Authorization: 'Bearer ' + $('token').value.trim()}, cache: 'no-store', signal: AbortSignal.timeout(30000)});
+    if (!response.ok) throw new Error(response.status === 401 ? 'Token tidak valid atau kedaluwarsa (HTTP 401)' : 'HTTP ' + response.status);
+    const data = await response.json();
+    if (!Array.isArray(data.daily) || !data.by_hazard || !data.by_severity || !data.by_area || !Number.isSafeInteger(data.total) || typeof data.partial !== 'boolean') throw new Error('Respons analitik tidak valid');
+    $('total').textContent = number(data.total); $('critical').textContent = number(data.by_severity.AWAS || 0);
+    $('area-count').textContent = number(Object.values(data.by_area).filter(count => count > 0).length);
+    for (const type of types) $('legend-' + type).textContent = number(data.by_hazard[type] || 0);
+    table('severity', data.by_severity); table('areas', data.by_area); currentDaily = data.daily; draw(currentDaily);
+    $('updated').textContent = 'Terakhir diperbarui: ' + new Date().toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+    $('timing').textContent = 'Request ' + ((performance.now() - started) / 1000).toFixed(2) + ' s · Client API /analytics';
+    hasData = true; $('panels').dataset.stale = 'false';
+    if (data.partial) setStatus('warn', 'Data parsial', 'Angka mungkin belum lengkap. Unit tidak tersedia atau sedang pulih: ' + (data.unavailable_units || []).join(', '));
+    else if (data.replication_degraded) setStatus('warn', 'Replika tertinggal', 'Data tersedia, tetapi versi replika belum seragam: ' + (data.lagging_units || []).join(', '));
+    else setStatus('ok', 'Data lengkap', 'Agregasi lintas seluruh lokasi penyimpanan. Setiap event dihitung satu kali.');
+  } catch (error) {
+    $('panels').dataset.stale = String(hasData);
+    setStatus('warn', hasData ? 'Data lama' : 'Gagal memuat', error.message + '. ' + (hasData ? 'Angka yang tampil belum diperbarui, bukan data terkini.' : 'Belum ada angka yang dapat ditampilkan.'));
+  } finally {
+    $('load').disabled = false; $('load-label').textContent = 'Refresh'; $('panels').setAttribute('aria-busy', 'false');
+  }
+});
 </script>
+</body>
 </html>

@@ -60,6 +60,13 @@ class Sandbox:
     def sql_at(self, pod, user, database, sql):
         return self.h.kube('exec', pod, '--', 'psql', '-v', 'ON_ERROR_STOP=1', '-U', user, '-d', database, '-At', '-c', sql)
 
+    def database_targets(self, values):
+        return [('aggregator-coordinator-0', 'aggregator_coord', 'COORDINATION_DATABASE_URL')] + [
+            ('postgres-' + letter.lower() + '-0', 'postgres', 'P1_STORAGE_' + letter + '_URL') for letter in 'ABC']
+
+    def configure(self, config):
+        pass
+
     def __enter__(self):
         h = self.h
         h.changes()
@@ -70,9 +77,7 @@ class Sandbox:
             config = json.loads(h.kube('get', 'configmap', 'aggregator-config', '-o', 'json'))['data']
             secret = json.loads(h.kube('get', 'secret', 'aggregator-credentials', '-o', 'json'))['data']
             values = {k: base64.b64decode(v).decode() for k, v in secret.items()}
-            database_targets = [('aggregator-coordinator-0', 'aggregator_coord', 'COORDINATION_DATABASE_URL')]
-            database_targets += [('postgres-' + letter.lower() + '-0', 'postgres', 'P1_STORAGE_' + letter + '_URL') for letter in 'ABC']
-            for pod, admin, key in database_targets:
+            for pod, admin, key in self.database_targets(values):
                 owner = urllib.parse.unquote(urllib.parse.urlsplit(values[key]).username)
                 self.sql_at(pod, admin, 'postgres', f'CREATE DATABASE {self.database} OWNER "{owner.replace(chr(34), chr(34)*2)}"')
                 self.created_databases.append((pod, admin))
@@ -85,6 +90,7 @@ class Sandbox:
                           AGGREGATOR_START_SINCE='1970-01-01T00:00:00Z', AGGREGATOR_READ_CACHE_TTL_MS='0',
                           AGGREGATOR_SHARED_READ_PROJECTION='false', P1_IMPORT_ONLY='false',
                           KAFKA_TOPIC=self.name, KAFKA_BROKERS='kafka:9092')
+            self.configure(config)
             h.kube('exec', 'kafka-0', '--', '/opt/kafka/bin/kafka-topics.sh', '--bootstrap-server', 'localhost:9092',
                    '--create', '--topic', self.name, '--partitions', '3', '--replication-factor', '1')
             self.topic_created = True

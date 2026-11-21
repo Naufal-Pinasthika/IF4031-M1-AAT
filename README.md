@@ -52,7 +52,7 @@ services/       Go application services, source mocks, and observability
 k8s/base/       Kubernetes workloads, platform, jobs, and network policy
 scripts/        Environment setup, manifest generation, demos, and local lab
 infra/vps/      Existing-server provisioning, deployment, and access
-test/           Reserved for future standalone test tooling
+test/           Report-facing P1/P3/P4 E2E scenarios and shared test harness
 docs/           Usage guides, references, runbooks, and status
 docs/changelog/ Design notes, historical changes, and test reports
 docker-compose.yml
@@ -98,8 +98,9 @@ and notifier HA remains deferred in the documented baseline.
 
 See [local checks](docs/guides/local-compose.md#development-checks).
 Old infrastructure test/diagnostic runners have been deleted, not moved.
-Future standalone test tooling belongs in [`test/`](test/README.md).
-Service-local Go tests and existing `scripts/` demonstrations remain unchanged.
+Reproducible P1/P3/P4 scenarios are in [`test/`](test/README.md); standalone
+test tooling belongs there, not in infrastructure provisioning scripts.
+Unit/integration tests remain beside services; `scripts/` demonstrations are available.
 
 ## Shutdown and Reset
 

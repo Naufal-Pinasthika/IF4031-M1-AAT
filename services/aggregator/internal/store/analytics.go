@@ -4,8 +4,6 @@ import (
 	"context"
 	"sort"
 	"time"
-
-	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
 )
 
 // p1
@@ -29,25 +27,66 @@ func hazardCounts() map[string]int {
 	return map[string]int{"SEISMIC": 0, "TSUNAMI": 0, "VOLCANIC": 0, "WILDFIRE": 0, "COASTAL": 0}
 }
 
-// p1 bucket on UTC occurrence dates, using the same canonical scan as audit
+func newAnalytics() Analytics {
+	return Analytics{ByHazard: hazardCounts(), Daily: []DailyCounts{}, BySeverity: map[string]int{"NORMAL": 0, "WASPADA": 0, "SIAGA": 0, "AWAS": 0}, ByArea: map[string]int{}, ReadStatus: ReadStatus{UnavailableUnits: []string{}}}
+}
+
+// Stream immutable identities in bounded batches, reconcile both replica
+// versions, then aggregate. No full-event pagination, history cache or stale TTL.
 func (s *Store) Analytics(ctx context.Context, from, to *time.Time) (Analytics, error) {
-	result := Analytics{ByHazard: hazardCounts(), Daily: []DailyCounts{}, BySeverity: map[string]int{"NORMAL": 0, "WASPADA": 0, "SIAGA": 0, "AWAS": 0}, ByArea: map[string]int{}}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type response struct {
+		value Analytics
+		err   error
+	}
+	partitions := len(s.units)
+	responses := make(chan response, partitions)
+	for partition := range partitions {
+		go func() {
+			value, err := s.analyticalPartition(ctx, partition, from, to)
+			responses <- response{value, err}
+		}()
+	}
+	result := newAnalytics()
 	days := map[string]map[string]int{}
-	status, err := s.forEach(ctx, EventFilter{From: from, To: to}, func(e model.HazardEvent) {
-		result.Total++
-		result.ByHazard[string(e.HazardType)]++
-		result.BySeverity[string(e.Severity)]++
-		result.ByArea[e.AreaName]++
-		day := e.OccuredAt.UTC().Format("2006-01-02")
-		if days[day] == nil {
-			days[day] = hazardCounts()
+	var firstError error
+	for range partitions {
+		r := <-responses
+		if r.err != nil {
+			if firstError == nil {
+				firstError = r.err
+				cancel()
+			}
+			continue
 		}
-		days[day][string(e.HazardType)]++
-	})
+		result.Total += r.value.Total
+		result.ReadStatus = mergeStatus(result.ReadStatus, r.value.ReadStatus)
+		for key, count := range r.value.ByHazard {
+			result.ByHazard[key] += count
+		}
+		for key, count := range r.value.BySeverity {
+			result.BySeverity[key] += count
+		}
+		for key, count := range r.value.ByArea {
+			result.ByArea[key] += count
+		}
+		for _, day := range r.value.Daily {
+			if days[day.Date] == nil {
+				days[day.Date] = hazardCounts()
+			}
+			for key, count := range day.Counts {
+				days[day.Date][key] += count
+			}
+		}
+	}
+	if firstError != nil {
+		return result, firstError
+	}
 	for day, counts := range days {
 		result.Daily = append(result.Daily, DailyCounts{day, counts})
 	}
 	sort.Slice(result.Daily, func(i, j int) bool { return result.Daily[i].Date < result.Daily[j].Date })
-	result.ReadStatus = status
-	return result, err
+	result.ReadStatus = mergeStatus(result.ReadStatus, s.readStatus())
+	return result, nil
 }

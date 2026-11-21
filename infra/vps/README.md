@@ -128,6 +128,19 @@ These deployment entry points remain in infrastructure tooling:
 - `update-aggregator.py`: Aggregator-only update; an explicitly requested schema
   cutover may stop old workers and is not a zero-downtime rolling-update proof.
 - `update-p2-observability.py`: observability integration update.
+- `prepare-analytics.py`: plan by default; `--apply` prepares two additive,
+  covering partial indexes on each canonical unit before the new analytics
+  reader is rolled out. Builds run concurrently with application traffic, one
+  unit at a time, with bounded lock/statement waits. A previously canceled,
+  invalid build of either named index is dropped concurrently and rebuilt;
+  canonical rows and PVCs are never deleted. Review any failure before retrying.
+  `--rebuild` explicitly rebuilds only these two indexes when their definition
+  changes. The boolean JSON retraction predicate must match the reader; a string
+  `"true"` is not a canonical boolean tombstone.
+
+For existing databases, run `python3 infra/vps/prepare-analytics.py --apply`
+before the scoped Aggregator update. Fresh database schemas create the same
+indexes automatically. Preserve the ignored `.e2e/analytics-indexes-*` evidence.
 
 Review compatibility and obtain fresh regression evidence before a rollout.
 Old test and diagnostic runners in `infra/vps/` have been removed; replacement
@@ -156,3 +169,20 @@ use the original singleton topology; notifier uses bbolt. See
 Run `python3 infra/vps/access.py observe` (from WSL, repository root), then open
 `http://localhost:8090`. The dashboard is forwarded over SSH; no public HTTP port
 was opened. Keep that terminal running and stop it with Ctrl+C when finished.
+
+## Private analytical dashboard
+
+This is the P1 business-data dashboard, separate from the operations dashboard.
+From WSL at the repository root, keep this command running:
+
+```sh
+python3 infra/vps/access.py tunnel
+```
+
+Open `http://localhost:30080/dashboard` manually. Enter a current Client API
+access token with `hazards:read:summary` (for example the Ops client's token
+obtained from `http://localhost:30084/v1/token` using its configured credentials).
+Credentials remain in the ignored `.env`; they are not embedded in the page.
+Inspect the five hazard series, UTC range controls, severity/area tables and
+complete/partial warning. Backend JSON/HTML tests do not replace this visual
+inspection. No Grafana analytics dashboard has been introduced by this change.
