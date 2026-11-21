@@ -30,7 +30,7 @@ CONFIG_KEYS = {
                    "COORDINATION_TIMEOUT_MS", "COASTAL_POLL_INTERVAL_MS", "COASTAL_HTTP_TIMEOUT_MS",
                    "COASTAL_MAX_STALENESS_MS", "COASTAL_CIRCUIT_FAILURES", "COASTAL_CIRCUIT_OPEN_MS",
                    # p1
-                   "P1_STORE_TIMEOUT_MS", "P1_IMPORT_ONLY"),
+                   "P1_STORE_TIMEOUT_MS", "P1_IMPORT_ONLY", "SATELLITE_URL", "PVMBG_ADAPTER_VERSION"),
     "auth": ("AUTH_ACCESS_TOKEN_TTL_SECONDS", "AUTH_REFRESH_TOKEN_TTL_SECONDS", "AUTH_MAX_IN_FLIGHT",
              "AUTH_JWT_ISSUER", "AUTH_JWT_AUDIENCE", "AUTH_JWT_KEY_ID", "MEDIA_CLIENT_ID",
              "FIELD_CLIENT_ID", "OPS_CLIENT_ID"),
@@ -95,7 +95,7 @@ def runtime_resources(values):
         ("notifier-consumer", "NOTIFIER", 8086, "notifier.db"),
     ):
         configs[name].update({"KAFKA_BROKERS": "kafka:9092", f"{prefix}_LISTEN_ADDRESS": f":{port}",
-                             f"{prefix}_STORE_PATH": f"/data/{filename}"})
+                             f"{prefix}_STORE_PATH": f"/data/{filename}", "GOMEMLIMIT": "96MiB"})
     configs["postgres"] = {"POSTGRES_DB": "aggregator", "POSTGRES_USER": "postgres",
                            "POSTGRES_APP_USER": values["POSTGRES_APP_USER"],
                            "PGDATA": "/var/lib/postgresql/data/pgdata"}
@@ -117,6 +117,10 @@ def runtime_resources(values):
         "client-api": {"AGGREGATOR_API_KEY": values["AGGREGATOR_API_KEY"]},
         "aggregator-coordinator": {"POSTGRES_PASSWORD": values["COORDINATOR_POSTGRES_PASSWORD"]},
     }
+    satellite_token = values.get("SATELLITE_TOKEN", "")
+    if "replace-with-" in satellite_token:
+        raise ValueError("set SATELLITE_TOKEN to a real feed token or leave it empty to disable the feed")
+    secrets["aggregator"]["SATELLITE_TOKEN"] = satellite_token
     # p1: stable Services replace pod IPs and the legacy single database URL.
     for letter in "ABC":
         secrets["aggregator"][f"P1_STORAGE_{letter}_URL"] = (
