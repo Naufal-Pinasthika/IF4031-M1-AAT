@@ -56,17 +56,23 @@ def trace(correlation):
         name=pod['metadata']['name']; records=[]
         try:
             raw=kube('pods/'+name+'/log?sinceSeconds=900&tailLines=5000&limitBytes=4194304').decode(errors='replace')
-            for line in raw.splitlines():
+            lines=raw.splitlines()
+            for line in lines:
                 try:record=json.loads(line)
                 except ValueError:continue
                 if record.get('correlation_id')!=correlation:continue
                 record={k:scrub(v) for k,v in record.items() if k in ALLOWED and isinstance(v,(str,int,float,bool,type(None)))}
                 record.update(service=app,pod=name,node=pod['spec'].get('nodeName'))
                 records.append(record)
-            return records,{'pod':name,'service':app,'read':True,'bounded':True,'lines':len(raw.splitlines())}
+            return records,{'pod':name,'service':app,'read':True,'bounded':True,'lines':len(lines)}
         except Exception as exc:return [],{'pod':name,'service':app,'read':False,'error':type(exc).__name__}
+    # Ingress logs roll over fastest under load. Read them before queuing
+    # downstream pods; otherwise their matching record can leave the bounded
+    # tail while the four log workers are occupied with earlier pods.
+    priority={'client-api':0,'auth':1,'aggregator-gateway':2,'aggregator':3}
+    candidates=sorted(pods(),key=lambda p:priority.get(p['metadata'].get('labels',{}).get('app',''),4))
     with ThreadPoolExecutor(max_workers=4) as pool:
-        for records,item in pool.map(read,pods()):
+        for records,item in pool.map(read,candidates):
             found.extend(records)
             if item:coverage.append(item)
     found.sort(key=lambda r:r.get('time',r.get('timestamp','')))
