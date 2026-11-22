@@ -124,64 +124,71 @@ func (p *ReadProjection) ReadPage(ctx context.Context, key string, ttl time.Dura
 		return fallback()
 	}
 	defer conn.Release()
-	if page, until, err := projectionLookup(ctx, conn, slot, hash); err == nil {
+	// Optional shared-cache I/O must not consume the canonical read deadline.
+	// The short budget covers lookup/locking, not the canonical fill itself.
+	cacheCtx, cacheCancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cacheCancel()
+	if page, until, err := projectionLookup(cacheCtx, conn, slot, hash); err == nil {
 		p.hits.Add(1)
 		return page, until, nil
 	}
 	// Cross-pod request coalescing is bounded. Hash collisions only reduce hits.
 	waitUntil := time.Now().Add(20 * time.Millisecond)
 	for {
-		tx, err := conn.Begin(ctx)
+		tx, err := conn.Begin(cacheCtx)
 		if err != nil {
 			return fallback()
 		}
 		var won bool
-		err = tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1,$2)`, namespace, int32(slot)).Scan(&won)
+		err = tx.QueryRow(cacheCtx, `SELECT pg_try_advisory_xact_lock($1,$2)`, namespace, int32(slot)).Scan(&won)
 		if err != nil {
-			tx.Rollback(ctx)
+			tx.Rollback(cacheCtx)
 			return fallback()
 		}
 		if won {
 			// Recheck after locking: another pod may have just published the result.
-			if page, until, err := projectionLookup(ctx, tx, slot, hash); err == nil {
-				tx.Rollback(ctx)
+			if page, until, err := projectionLookup(cacheCtx, tx, slot, hash); err == nil {
+				tx.Rollback(cacheCtx)
 				p.hits.Add(1)
 				return page, until, nil
 			}
 			var beganDB time.Time
 			began := time.Now()
-			if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&beganDB); err != nil {
-				tx.Rollback(ctx)
+			if err = tx.QueryRow(cacheCtx, `SELECT clock_timestamp()`).Scan(&beganDB); err != nil {
+				tx.Rollback(cacheCtx)
 				return fallback()
 			}
 			p.fills.Add(1)
+			cacheCancel()
 			page, fillErr := fill(ctx)
+			publishCtx, publishCancel := context.WithTimeout(ctx, 20*time.Millisecond)
+			defer publishCancel()
 			until := began.Add(ttl)
 			payload, encodeErr := json.Marshal(page)
 			if fillErr == nil && encodeErr == nil && !page.Partial && len(payload) <= 1<<20 && time.Now().Before(until) {
-				_, err = tx.Exec(ctx, `INSERT INTO read_page_projection(slot,cache_key,payload,expires_at) VALUES($1,$2,$3,$4)
+				_, err = tx.Exec(publishCtx, `INSERT INTO read_page_projection(slot,cache_key,payload,expires_at) VALUES($1,$2,$3,$4)
     ON CONFLICT(slot) DO UPDATE SET cache_key=excluded.cache_key,payload=excluded.payload,expires_at=excluded.expires_at
     WHERE read_page_projection.expires_at<excluded.expires_at`, slot, hash, payload, beganDB.Add(ttl))
 				if err == nil {
-					err = tx.Commit(ctx)
+					err = tx.Commit(publishCtx)
 				} else {
-					tx.Rollback(ctx)
+					tx.Rollback(publishCtx)
 				}
 				// A failed publication does not erase a successful canonical result.
 				if err != nil {
 					p.fallback.Add(1)
 				}
 			} else {
-				tx.Rollback(ctx)
+				tx.Rollback(publishCtx)
 			}
 			return page, until, fillErr
 		}
-		tx.Rollback(ctx)
-		if page, until, err := projectionLookup(ctx, conn, slot, hash); err == nil {
+		tx.Rollback(cacheCtx)
+		if page, until, err := projectionLookup(cacheCtx, conn, slot, hash); err == nil {
 			p.hits.Add(1)
 			return page, until, nil
 		}
-		if !time.Now().Before(waitUntil) {
+		if !time.Now().Before(waitUntil) || cacheCtx.Err() != nil {
 			return fallback()
 		}
 		select {

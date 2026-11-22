@@ -187,18 +187,26 @@ func (s *Store) Close() {
 // Ping succeeds when at least one canonical storage unit is reachable. Reads
 // can remain explicitly partial while a failed P1 replica is recovering.
 func (s *Store) Ping(ctx context.Context) error {
-	var lastErr error
-	for _, u := range s.units {
-		op, cancel := context.WithTimeout(ctx, s.timeout)
-		err := u.probe.Ping(op)
-		cancel()
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-	}
-	if lastErr == nil {
+	if len(s.units) == 0 {
 		return fmt.Errorf("no storage units configured")
+	}
+	op, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	results := make(chan error, len(s.units))
+	for _, u := range s.units {
+		go func() { results <- u.probe.Ping(op) }()
+	}
+	var lastErr error
+	for range s.units {
+		select {
+		case err := <-results:
+			if err == nil {
+				return nil
+			}
+			lastErr = err
+		case <-op.Done():
+			return op.Err()
+		}
 	}
 	return lastErr
 }

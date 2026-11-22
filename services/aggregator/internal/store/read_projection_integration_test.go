@@ -2,12 +2,14 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Naufal-Pinasthika/IIF4031-M1-AAT/services/aggregator/internal/model"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func projectionTest(t *testing.T) (*ReadProjection, string) {
@@ -152,5 +154,49 @@ func TestPostgresReadProjectionCoalescesConcurrentPods(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("concurrent pods repeated fill: %d", calls.Load())
+	}
+}
+
+func TestPostgresReadProjectionBlockedIOCannotDelayCanonicalResult(t *testing.T) {
+	p, url := projectionTest(t)
+	admin, err := pgxpool.New(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	for _, phase := range []string{"lookup", "publish"} {
+		t.Run(phase, func(t *testing.T) {
+			key := "blocked-" + phase
+			digest := sha256.Sum256([]byte(key))
+			slot := int(digest[0] % 32)
+			if _, err := admin.Exec(t.Context(), `INSERT INTO read_page_projection VALUES($1,'expired','{}',clock_timestamp()-interval '1 second') ON CONFLICT(slot) DO UPDATE SET expires_at=excluded.expires_at`, slot); err != nil {
+				t.Fatal(err)
+			}
+			tx, err := admin.Begin(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(context.Background())
+			if phase == "lookup" {
+				_, err = tx.Exec(t.Context(), "LOCK read_page_projection IN ACCESS EXCLUSIVE MODE")
+			} else {
+				_, err = tx.Exec(t.Context(), "SELECT slot FROM read_page_projection WHERE slot=$1 FOR UPDATE", slot)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			started := time.Now()
+			page, _, err := p.ReadPage(ctx, key, time.Second, func(ctx context.Context) (EventPage, error) {
+				if err := ctx.Err(); err != nil {
+					return EventPage{}, err
+				}
+				return EventPage{Events: []model.HazardEvent{{HazardID: "canonical-survivor"}}}, nil
+			})
+			if err != nil || len(page.Events) != 1 || page.Events[0].HazardID != "canonical-survivor" || time.Since(started) > 250*time.Millisecond {
+				t.Fatalf("optional %s I/O delayed/erased canonical data: elapsed=%s page=%+v err=%v", phase, time.Since(started), page, err)
+			}
+		})
 	}
 }
