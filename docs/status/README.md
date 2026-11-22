@@ -3,6 +3,53 @@
 Snapshot: 22 November 2026 (WIB). Results below distinguish repeated practice
 E2E evidence from historical results and the later assistant/exam comparison.
 
+## Latest P2 external-generator update
+
+A separate 8-vCPU / approximately 8-GB VPS now runs k6 1.4.2 outside Kubernetes.
+It reaches the existing common gateway over WireGuard; SSH carries control and
+evidence only. Production images, volumes, budgets and the original Sensor
+Pantai state were not changed by the P2 campaign.
+
+The first completed direct-VPN scaling test held 10,000 VUs for 120 seconds and
+observed 3→5→2 Ready Aggregators. It completed 891,648 requests: 688,716 complete
+2xx responses and 202,932 controlled 429s, with zero unexpected failures and
+p95 1.513 seconds. Eighty BMKG/PVMBG polling attempts reconciled with upstream
+logs without multiplied endpoints, cadence violations or repeated admissions.
+The replica count was restored to three. This is a bounded workload/scaling
+pass, **not an overall P2 pass**; comparison, clock/freeze and rolling evidence
+must be evaluated separately.
+
+The external-generator throughput comparisons subsequently measured **1.525×**
+and **1.290×**, below P2.7's ≥2× target, despite zero unexpected errors in each
+case. Single-instance complete throughput was 3,415–4,043/s; three-instance
+complete throughput was 5,208–5,216/s. A separate idle-path WireGuard diagnostic
+carried 833–849 Mbps, so a hard 500-Mbps path cap is not established. Subsequent
+profiling found significant generator JSON parsing/GC and gateway network-copy
+cost, with no added cgroup CPU throttling in the sampled pods. Using the same
+workload and validation with an explicitly recorded generator runtime (8 Go
+processors, GOGC 300) measured **4,509 → 6,344 complete RPS (1.407×)**, still
+below the target. Response coalescing, internal gzip and three gateway replicas
+did not improve the result and were rolled back; original application code,
+images and the two-gateway topology were restored. The completed
+counterbalancing campaign reconciled 64 further mock polls without duplication
+or cadence violations and restored three Aggregators.
+
+Two separately labelled generator/path calibrations served an exact real
+20-event response snapshot from a temporary authenticated private listener,
+without the database or gateway. They reached **6,800–6,862 complete RPS**
+with the original k6 parsing and validation. These are not application results
+or P2 passes; they show insufficient measurement headroom for proving about
+9,018 RPS (twice the 4,509-RPS baseline) with this setup. Additional independent
+generator capacity should be measured before attributing the remaining ratio
+to Kafka or database scale-out.
+
+Three prior actual-owner crash rounds also passed the mock-window coverage and
+deduplication checks, taking 3.389–7.209 seconds to complete takeover. Failed
+SSH-forwarded laptop campaigns and invalid negative timing samples remain
+recorded, rather than being reclassified as passes. See the
+[P2 verification report](../changelog/P2-capacity-verification.md) and
+[reproducible commands](../../test/README.md#p2-capacity-and-polling).
+
 ## Latest P5 critical-path update
 
 P5 work has resumed. **Overall P5 is still not passed.** Aggregator now runs
