@@ -194,7 +194,7 @@ class Sandbox:
         h.urls, h.sql = self.original_urls, self.original_sql
         if not re.fullmatch(r'aat_e2e_[0-9a-f]{10}', self.database):
             raise Failure('Refusing cleanup of an unverified database name')
-        h.kube('delete', 'deployment,service,configmap,secret,networkpolicy', '-l', 'aat-e2e=' + self.suffix,
+        h.kube('delete', 'deployment,daemonset,service,configmap,secret,networkpolicy', '-l', 'aat-e2e=' + self.suffix,
                '--ignore-not-found=true', '--wait=true', '--timeout=90s')
         for pod, admin in self.created_databases:
             self.sql_at(pod, admin, 'postgres', f'DROP DATABASE IF EXISTS {self.database} WITH (FORCE)')

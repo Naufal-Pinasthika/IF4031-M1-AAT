@@ -93,12 +93,18 @@ python3 test/tester-agent/08-wipe-node.py --vps --allow-changes --backup-manifes
 ```
 
 Backup streams go directly through SSH to the external generator, outside all
-application nodes. Database dumps are transaction-consistent individually;
+application nodes. PostgreSQL dumps use the observed Ready container through
+the owning node's local `crictl exec`, avoiding long data streams through the
+API-server/kubelet WebSocket proxy. Archives are logical transaction-consistent
+per database, not a global atomic snapshot. Metadata includes DaemonSets as
+well as Deployments, StatefulSets and volume definitions. An interrupted or
+incomplete manifest is never accepted for `wipe-node`.
+
 Kafka and bbolt volumes are archived while their owning StatefulSet is stopped,
 then restored to its prior replica count. This maintenance is **before** the
 fault, not a recovery intervention. Kubernetes metadata, database globals and
 credentials are private backup material, never repository content. The backup
-is not a globally atomic cross-service snapshot. `08` rechecks every full-file
+stays private. `08` rechecks every full-file
 SHA-256, volume identity and backup age before submitting the official scenario.
 It does not manually delete OS disks or restore backup data during observation.
 Known canonical identities are compared before/after; live SATELIT records are
@@ -106,7 +112,13 @@ excluded from that specific preservation comparison because fire retractions
 are legitimate. This is not the later assistant-reference checksum test.
 
 The shared practice runner removes only its own exact persisted practice request
-after the measurement window, using resource-version and value checks. This
+after the measurement window, using resource-version and value checks. For
+`wipe-node`, the destructive stimulus ends when the target powers off: the runner
+retires its request then, before planned operator reintroduction. Keep the VPS
+off until the runner names it and confirms trigger removal; press **Start**, not
+Rebuild. Application reads continue to be observed across shutdown and reboot.
+Provider power-on is a planned P1 reintroduction, not automatic VM recovery or
+proof of P5 combined-fault acceptance. This
 prevents a completed `wipe-node` trigger replaying when a node boots. The private
 pre-cleanup queue snapshot is retained; Agent specifications, privileges and
 other operators' requests are never edited. Do not start another campaign while
@@ -119,6 +131,40 @@ python3 test/tester-agent/09-gateway-failover.py --vps --allow-changes --client-
 python3 test/tester-agent/10-audit-recovery.py --vps --baseline <private-before-identities.txt.gz> --repeat 3
 python3 test/tester-agent/11-api-rollout.py --vps --allow-changes --repeat 3
 ```
+
+Source-owner fencing has a separate isolated VPS workflow. Cross-compile the
+service-local Go store tests to a fresh Linux/amd64 binary, then run:
+
+```sh
+python3 test/tester-agent/12-fencing.py --vps --allow-changes --repeat 3 --store-test-binary .e2e/fencing-store.test
+```
+
+It pauses the actual run-owned polling process beyond its lease lifetime,
+observes takeover and fresh admissions while that process remains frozen, then
+resumes the same process. A worker clock is also held at +45/-30 seconds with
+NTP disabled and restored afterward. Private upstream request records, durable
+admissions and service-local negative fencing regressions are checked together.
+Availability failures remain failures even when ownership safety is demonstrated.
+The isolated read path mirrors the production per-node gateway and
+`PreferSameNode` Service rather than bypassing the L7 router. An independent
+Field observer runs throughout the complete window, including takeover and
+resume waits; its requests are not retried into a passing measurement.
+All temporary databases, workloads and source fixtures are run-owned; neither the
+vendor Sensor Pantai nor official Agent is modified. This freezes a process, not
+the whole node kernel: P2.5's node/VM suspend-resume demonstration remains a
+separate requirement. Powering off and booting a new process does not substitute
+for resuming the old process after a VM freeze.
+
+For an overlapping official partition and priority-load window:
+
+```sh
+python3 test/tester-agent/13-partition-load.py --vps --allow-changes --repeat 3
+```
+
+The existing laptop k6 workload runs for 120 seconds while the real Agent
+partitions peers. Read errors and the workload's original role/error thresholds
+are retained and fail the run. This is concurrent network/load evidence, not a
+substitute for critical-alert delivery measurements or the encrypted exam.
 
 `09` freezes a run-owned gateway's existing keep-alive connection and listener,
 then reads real canonical data through a candidate Client API and the healthy
@@ -650,6 +696,21 @@ equivalence and the catch-up bound directly. Live observation records real
 backlog separately; checkpoint progress or processing p95 alone never substitutes
 for those assertions. `04-dashboard` verifies the same query used by the live
 dashboard, rather than merely checking that a metrics endpoint exists.
+
+## External fault observation
+
+For official fault cases, `--vps --ingress-vps` originates API TCP connections
+on the inventory's separate `load_generator` VPS, then forwards responses to
+the local runner. The application target remains A's same NodePorts; kubectl,
+mock administration and fault control remain separate SSH control channels.
+Without `--ingress-vps`, API connections originate on A itself. Record these
+as different network paths: Kubernetes host-originated NodePort routing can
+select remote endpoints even with `externalTrafficPolicy: Local`. Do not erase
+earlier failures or present one path's pass as proof for the other.
+
+```sh
+python3 test/tester-agent/06-partition.py --vps --ingress-vps --allow-changes --repeat 3
+```
 
 ## After the deadline
 

@@ -35,8 +35,10 @@ while time.monotonic()<end:
                 h.artifact(f'round-{repetition+1}-clock-traces.json', clocks)
         h.check(any(node['largest_jump_seconds'] >= 10 for node in clocks),
                 'A large realtime jump relative to monotonic time was directly observed at 20 Hz')
-        h.check(all(abs(node.get('offset_seconds', 1e9)) < 2 for node in result['hosts_after']),
-                'Every node clock returned close to the independent laptop clock')
+        baseline = {node['node']: node.get('offset_seconds') for node in result['hosts_before']}
+        h.check(all(node.get('offset_seconds') is not None and baseline.get(node['node']) is not None
+                    and abs(node['offset_seconds']-baseline[node['node']]) < 2 for node in result['hosts_after']),
+                'Every node clock returned within two seconds of its independently measured pre-fault offset')
 
 
 if __name__ == '__main__':

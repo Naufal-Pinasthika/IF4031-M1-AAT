@@ -34,6 +34,8 @@ print(json.dumps({'path':str(p),'resolved':str(p.resolve(strict=True)),'link':li
     scenarios = h.kube('-n', 'tester-agent', 'exec', 'daemonset/tester-agent', '--', '/app', 'list').splitlines()
     h.check(set(scenarios) == {'clock-skew', 'kill-leader', 'kill-store', 'partition', 'schema', 'wipe-node'}, 'Official practice scenarios are discoverable')
     for p in pods:
+        version = h.kube('-n', 'tester-agent', 'exec', p['metadata']['name'], '--', '/host/usr/sbin/iptables', '--version')
+        h.check('iptables v' in version, 'Host iptables actually executes from the unchanged Agent: '+p['spec']['nodeName'])
         h.artifact(p['metadata']['name']+'-log.json', {'log': h.kube('-n', 'tester-agent', 'logs', p['metadata']['name'], '--tail=100')})
     h.artifact('baseline.json', {'daemonset': ds, 'nodes': nodes, 'agent_pods': pods, 'scenarios': scenarios,
                                 'application_pods': h.pods(),

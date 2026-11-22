@@ -31,6 +31,7 @@ def parser(description):
     p = argparse.ArgumentParser(description=description)
     p.add_argument('--env-file', type=Path, default=ROOT / '.env')
     p.add_argument('--vps', action='store_true', help='Use private inventory, SSH tunnels and remote kubectl')
+    p.add_argument('--ingress-vps', action='store_true', help='Originate NodePort connections on the external inventory load_generator, not a cluster host')
     p.add_argument('--kubeconfig', type=Path, help='Local kubectl configuration when not using --vps')
     p.add_argument('--client-url', default=os.getenv('TEST_CLIENT_URL', 'http://127.0.0.1:30080'))
     p.add_argument('--auth-url', default=os.getenv('TEST_AUTH_URL', 'http://127.0.0.1:30084'))
@@ -108,6 +109,26 @@ class Harness:
                     if time.monotonic() >= end:
                         raise Failure('SSH tunnel did not become available')
                     time.sleep(.2)
+            if self.args.ingress_vps:
+                origin = self.hosts.data.get('load_generator')
+                self.check(bool(origin) and origin['host'] not in {n['host'] for n in self.hosts.nodes},
+                           'Ingress observer originates outside every application cluster node')
+                command = self.hosts.command(origin, '', multiplex=False)[:-2]
+                for name in ('client', 'auth', 'aggregator'):
+                    with socket.socket() as sock:
+                        sock.bind(('127.0.0.1', 0))
+                        port = sock.getsockname()[1]
+                    command += ['-L', f'127.0.0.1:{port}:{targets[name]}']
+                    self.urls[name] = f'http://127.0.0.1:{port}'
+                command += ['-o', 'ExitOnForwardFailure=yes', '-N', origin['user'] + '@' + origin['host']]
+                tunnel = subprocess.Popen(command)
+                self.extra_processes.append(tunnel)
+                time.sleep(.5)
+                self.check(tunnel.poll() is None, 'External ingress SSH observer is active')
+                self.artifact('ingress-origin.json', {'origin': origin['name'], 'targets': targets,
+                    'scope': 'Same NodePorts and API assertions; TCP originates outside the cluster. The mock/control channel remains on the control-plane host.'})
+        elif self.args.ingress_vps:
+            raise Failure('--ingress-vps requires --vps')
         self.artifact('environment.json', {'urls': self.urls, 'via_vps': self.args.vps,
                                           'curl': subprocess.check_output([self.curl, '--version'], text=True).splitlines()[0]})
         self.artifact('deployment.json', {'pods': self.pods()})
