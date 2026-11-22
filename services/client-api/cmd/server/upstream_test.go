@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -120,4 +121,42 @@ func TestAnalyticsRetainsLongerHeaderBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
+}
+
+func TestReadRetrySelectsDifferentResolvedGateway(t *testing.T) {
+	var badCalls, goodCalls atomic.Int32
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { badCalls.Add(1); <-r.Context().Done() }))
+	defer bad.Close()
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		goodCalls.Add(1)
+		if r.Host != "gateways.test:8083" || r.URL.RawQuery != "limit=20" || r.Header.Get("X-Correlation-ID") != "avoid-dead-gateway" {
+			t.Error("retry changed logical target or request identity")
+		}
+		io.WriteString(w, "survivor")
+	}))
+	defer good.Close()
+	client := newAggregatorClient(4)
+	defer client.CloseIdleConnections()
+	transport := client.Transport.(*gatewayReadTransport)
+	transport.regular.ResponseHeaderTimeout = 30 * time.Millisecond
+	transport.lookup = func(ctx context.Context, name string) ([]string, error) {
+		return []string{"127.0.0.1", "127.0.0.2"}, nil
+	}
+	transport.regular.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		target := strings.TrimPrefix(bad.URL, "http://")
+		if strings.HasPrefix(address, "127.0.0.2:") {
+			target = strings.TrimPrefix(good.URL, "http://")
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, target)
+	}
+	r, _ := http.NewRequestWithContext(t.Context(), "GET", "http://gateways.test:8083/internal/events?limit=20", nil)
+	r.Header.Set("X-Correlation-ID", "avoid-dead-gateway")
+	response, err := client.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if badCalls.Load() != 1 || goodCalls.Load() != 1 {
+		t.Fatalf("retry returned to failed address: bad=%d good=%d", badCalls.Load(), goodCalls.Load())
+	}
 }
