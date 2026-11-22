@@ -77,6 +77,10 @@ pod/node traffic. No database or Kubernetes API port is opened publicly.
 NodePorts are restricted to `10.77.0.0/24` by kube-proxy on **every** node.
 The official Tester Agent manifest/image/RBAC is applied unchanged.
 
+Provisioning enables `ufw.service` at boot as well as loading the rules now.
+Check both `ufw status` and `systemctl is-enabled ufw`: active kernel rules do
+not by themselves prove that host filtering will survive the next reboot.
+
 Ubuntu's absolute `/usr/sbin/iptables` alternatives symlink escapes the Agent's
 `/host` bind mount. A relative link alone is insufficient: the dynamically linked
 distro binary also needs an interpreter absent from the Agent container.
