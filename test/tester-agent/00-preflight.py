@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import shlex
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
@@ -9,6 +10,20 @@ IMAGE = 'sustuna/tester-agent@sha256:b3143da159cf23a8744ede12b847da6208353754234
 
 
 def scenario(h):
+    if h.args.vps:
+        tools = []
+        probe = '''import json,os,pathlib,subprocess
+p=pathlib.Path('/usr/sbin/iptables')
+link=os.readlink(p) if p.is_symlink() else None
+print(json.dumps({'path':str(p),'resolved':str(p.resolve(strict=True)),'link':link,
+ 'host_mount_visible':not link or not link.startswith('/'),
+ 'version':subprocess.check_output([str(p),'--version'],text=True).strip()}))
+'''
+        for node in h.hosts.nodes:
+            tool = json.loads(h.hosts.ssh(node, 'python3 -c '+shlex.quote(probe), capture=True))
+            tools.append({'node': node['name'], **tool})
+            h.check(tool['host_mount_visible'], 'Host iptables discovery does not escape the Agent host mount: '+node['name'])
+        h.artifact('host-tools.json', tools)
     ds = json.loads(h.kube('-n', 'tester-agent', 'get', 'daemonset/tester-agent', '-o', 'json'))
     nodes = json.loads(h.kube('get', 'nodes', '-o', 'json'))['items']
     pods = json.loads(h.kube('-n', 'tester-agent', 'get', 'pods', '-l', 'app=tester-agent', '-o', 'json'))['items']

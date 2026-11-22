@@ -265,6 +265,111 @@ recovery and production redundancy also remain open until measured.
 
 ## Latest Tester Agent / polling update
 
+### Full-practice follow-up, 22 November
+
+The prior P2 work was committed in three pieces, pushed and merged into `main`
+as `37fe9d3`. Further fault work is on `test/tester-agent-full`, not merged back.
+New repeated preflight, pod-kill, actual-owner failover and compatible-schema
+checks passed. Three strengthened official store-kill rounds observed 54/56/60
+valid reads and stable recovery in 67.9/71.5/70.4 seconds. Three high-frequency
+clock rounds observed actual 300-second jumps with successful API reads and
+clock recovery. The displaced clock was corrected after roughly 0.2 seconds;
+this does not prove a sustained 30-second skew or the entire P2 fencing gate.
+
+Partition practice initially failed because Ubuntu's absolute `iptables`
+alternatives link escaped the Agent's host bind mount. Provisioning now retains
+the selected distro binary through a relative symlink, saving the original link
+and verifying unchanged firewall rules/version. Subsequent Agent steps completed,
+but the final independent TCP/kernel-event observation **did not establish the
+intended network partition**. Earlier passes based on isolated TCP failures are
+insufficient and are superseded by this stricter result. Do not claim partition
+resilience passed. No Agent image, permissions or scenario was modified.
+
+The operator approved `wipe-node` after backup. A completed private off-cluster
+backup contains 26 files / 628,875,856 bytes; full-file SHA-256 checks passed
+immediately before submission. The baseline includes 553,167 non-SATELIT
+canonical identities. After official `wipe-node` submission, C became unreachable
+on both SSH and kubelet; A/B remained Ready. The initial runner stopped on an
+Agent-log proxy error, so it did not establish uninterrupted availability through
+the whole wipe. A supplemental 120-second observer recorded 172 read samples, including
+one Field transport timeout at about 20 seconds; later observed reads succeeded.
+That timeout is a real open availability issue, not a controlled overload pass.
+
+C subsequently powered off again after operator starts. Previous Agent logs
+confirm that its persistent practice request `001be28a410f` replayed on startup:
+`wipe-node` began again at 04:21:39 UTC and `wipe_and_shutdown` at 04:21:44 UTC.
+The exact own practice trigger was privately backed up and removed using a
+resource-version/test-and-remove patch. The Agent image, specification, privileges
+and identity were retained; no other operator request or exam definition was
+changed. C then stayed online after the operator started it. All three nodes and
+official Agents returned Ready, without a VPS rebuild or backup restore.
+
+The canonical store rebuilt C automatically. A direct physical SQL comparison
+found **zero missing baseline identities and zero with fewer than two copies**
+among the 553,167 non-SATELIT identities. This establishes physical preservation
+and restored redundancy, not uninterrupted API availability during the wipe.
+A subsequent full Audit enumeration still encountered an explicit partial page.
+Reproduction at that same cursor identified `coverage_unproven`, not a database
+outage: a 1,000-row Audit page could not enlarge its candidate prefix, and refills
+incorrectly tried to certify the enlarged internal page rather than the caller's
+requested prefix. The correction retains three bounded rounds and real partial
+responses when coverage is unproved. A PostgreSQL regression fails on the old
+code and passes three times after the fix; the separate latest-version oracle
+and unavailable-replica regressions also pass three times.
+
+Client API now bounds ordinary gateway response-header waiting, reconnects once
+for bodyless GET/HEAD transport failures, and uses headless gateway discovery.
+Writes, HTTP error responses and partial response bodies are never replayed by
+this wrapper. Three isolated VPS fault rounds returned real canonical Field data
+in **2.188 / 2.199 / 2.225 seconds**, with the exact pooled gateway frozen and
+the other gateway healthy. This is not proof for every arbitrary network fault.
+The first scoped production rollout exposed two refused Client API connections;
+that failed observation is retained. A follow-up adds termination drain and
+endpoint-withdrawal delay. The deployed versions are
+`aat/aggregator:m2-audit-prefix-20261122-r1` and
+`aat/client-api:m2-client-read-failover-20261122-r2`. Three subsequent Client API
+rolling restarts returned **175/175 successful Field reads** (58/58/59 samples).
+Three full post-wipe Audit enumerations each completed **564 pages**, all
+complete, and retained **all 553,167 baseline non-SATELIT identities**, with zero
+missing. No backup restore or manual data copy occurred. These close the observed
+read-path defects; they do not retrospectively turn the interrupted wipe window
+into an uninterrupted-availability pass or establish every combined-fault SLO.
+After these fixes, three further official `kill-store` rounds passed with
+**118 / 106 / 102 valid read samples**, zero invalid reads and stable automatic
+recovery within 72 seconds in every round. The independent observer stayed
+active through fault and recovery. Each exact own trigger was removed only after
+the window; the original Agent and volume identities were retained.
+
+Still open: an independently demonstrated network partition, sustained skew /
+all fencing assertions and combined-fault acceptance. The staged coordinator and
+notifier database clusters each retain one unready C replica after their local
+data was wiped; production does not use those staged clusters. The immutable
+long-running Sensor Pantai also remains unready. The production bbolt notifier
+is Ready. These observations do not justify an overall Tester Agent/P5 pass.
+
+Before another destructive campaign, the runner keeps API observation independent
+of log retrieval, bounds/tolerates unavailable logs, checks node readiness and
+removes only its own exact persisted practice trigger after the observation
+window. No new wipe has been submitted. Private evidence:
+
+- `tester-agent/07-backup/20261122T010226Z-bc473262`
+- `tester-agent/04-kill-store/20261122T010559Z-9bc318d1`
+- `tester-agent/05-clock-skew/20261122T011050Z-45116ebe` and `20261122T011214Z-f683c553`
+- `tester-agent/06-partition/20261122T012214Z-a2213715`
+- `tester-agent/08-wipe-node/20261122T012341Z-62bb25e3`
+- `tester-agent/wipe-observer/20261122T012637Z-c279af96`
+- `.e2e/tester-practice-cleanup-20261122T042334Z`
+- `.e2e/post-wipe-physical-audit-20261122T043202Z`
+- `tester-agent/audit-diagnosis/20261122T044102Z-6e8a50e8`
+- `tester-agent/09-gateway-failover/20261122T044401Z-ec9585c7`
+- `tester-agent/read-recovery-rollout/20261122T044837Z-f9f66f23`
+- `tester-agent/10-audit-recovery/20261122T045000Z-c8282067`
+- `tester-agent/11-api-rollout/20261122T045305Z-1ca2dd7d`
+- `tester-agent/00-preflight/20261122T045435Z-54c1c25e`
+- `tester-agent/04-kill-store/20261122T045502Z-a3203fff`
+
+### Earlier checkpoint
+
 At that checkpoint P5/HA work was paused. Official Agent discovery and three `kill-leader` practice
 rounds passed, but those faults hit a standby Aggregator on C while BMKG/PVMBG
 polling belonged to A. They did not prove polling takeover.

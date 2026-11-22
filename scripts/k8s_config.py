@@ -95,7 +95,7 @@ def runtime_resources(values):
                                   "COASTAL_URL": "http://sensor-pantai:8080",
                                   "KAFKA_BROKERS": "kafka:9092", "AGGREGATOR_LISTEN_ADDRESS": ":8083"})
     configs["auth"]["AUTH_LISTEN_ADDRESS"] = ":8084"
-    configs["client-api"].update({"AGGREGATOR_URL": "http://aggregator:8083",
+    configs["client-api"].update({"AGGREGATOR_URL": "http://aggregator-gateways:8083",
                                   "AUTH_JWKS_URL": "http://auth:8084/.well-known/jwks.json"})
     for name, prefix, port, filename in (
         ("dashboard-consumer", "DASHBOARD", 8085, "dashboard.db"),

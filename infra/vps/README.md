@@ -24,8 +24,11 @@ Run report-facing tests from [`test/`](../../test/README.md) with
 WireGuard to the common gateway NodePort, never to individual Aggregator pods.
 Generator jobs run as the SSH user, receive only the needed API key over SSH
 stdin, enforce a bounded runtime/memory guard and keep private per-run files.
-Do not copy the operator private SSH key, cluster secrets or entire `.env`
-onto the generator. Provisioning alone is not a P2 acceptance pass.
+Normal load jobs must not copy the operator private SSH key, cluster secrets or
+the entire `.env` onto the generator. Separately approved destructive-test
+backups use a private `~/.local/state/aat-backups/<run>` directory there; those
+archives contain sensitive cluster metadata and must remain outside Git and
+outside load-job directories. Provisioning alone is not a P2 acceptance pass.
 
 For script selection and side effects, see the [script catalog](SCRIPTS.md).
 For the restored source versus live-runtime boundary, see the
@@ -56,6 +59,15 @@ controller remains enabled. UFW permits SSH, peer-only UDP 51820, and internal
 pod/node traffic. No database or Kubernetes API port is opened publicly.
 NodePorts are restricted to `10.77.0.0/24` by kube-proxy on **every** node.
 The official Tester Agent manifest/image/RBAC is applied unchanged.
+
+Ubuntu's absolute `/usr/sbin/iptables` alternatives symlink escapes the Agent's
+`/host` bind mount during binary discovery. The `tester-tools` provisioning step
+replaces only that symlink with a relative link to the **same selected distro
+binary**. It verifies unchanged version/filter rules and saves the original link
+in `/etc/aat-vps/iptables-link-before-tester.json`. It neither flushes firewall
+rules nor changes the Agent. Re-run this step after package/alternatives changes
+before a practice campaign; an Agent step marked successful is still not proof
+that a network fault actually took effect.
 
 This is **not full HA**: control plane, Kafka and coordination database remain
 singletons on A. The intended worker-failure tests do not establish A-failure

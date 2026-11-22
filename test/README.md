@@ -32,6 +32,9 @@ python3 test/tester-agent/00-preflight.py --vps
 python3 test/tester-agent/01-kill-leader.py --vps --allow-changes --repeat 3
 python3 test/tester-agent/02-polling-failover.py --vps --allow-changes --repeat 3
 python3 test/tester-agent/03-schema.py --vps --allow-changes --repeat 3
+python3 test/tester-agent/04-kill-store.py --vps --allow-changes --repeat 3
+python3 test/tester-agent/05-clock-skew.py --vps --allow-changes --repeat 3
+python3 test/tester-agent/06-partition.py --vps --allow-changes --repeat 3
 ```
 
 Preflight verifies the official image digest, one Ready Agent per node and
@@ -76,7 +79,58 @@ versions are rejected.
 The `01` case proves Agent execution and pod/readiness recovery only. It does not prove
 that the killed pod owned a particular source, the ingestion takeover SLO,
 exactly-once polling, or data-loss resistance. Those require separate assertions.
-`wipe-node` is not run by these scripts and can permanently delete node data.
+Cases `04`–`06` observe actual Agent actions and cleanup, independent node
+clocks/firewall snapshots, and complete or explicitly partial API reads until
+previously Ready applications and complete pages recover stably. Clock tests
+do not by themselves prove every P2 fencing requirement.
+
+`wipe-node` permanently deletes node-local application data. It requires explicit
+operator approval, a separate practice window and a verified fresh backup:
+
+```sh
+python3 test/tester-agent/07-backup.py --vps --allow-changes
+python3 test/tester-agent/08-wipe-node.py --vps --allow-changes --backup-manifest .e2e/report-tests/tester-agent/07-backup/<run>/backup-manifest.json
+```
+
+Backup streams go directly through SSH to the external generator, outside all
+application nodes. Database dumps are transaction-consistent individually;
+Kafka and bbolt volumes are archived while their owning StatefulSet is stopped,
+then restored to its prior replica count. This maintenance is **before** the
+fault, not a recovery intervention. Kubernetes metadata, database globals and
+credentials are private backup material, never repository content. The backup
+is not a globally atomic cross-service snapshot. `08` rechecks every full-file
+SHA-256, volume identity and backup age before submitting the official scenario.
+It does not manually delete OS disks or restore backup data during observation.
+Known canonical identities are compared before/after; live SATELIT records are
+excluded from that specific preservation comparison because fire retractions
+are legitimate. This is not the later assistant-reference checksum test.
+
+The shared practice runner removes only its own exact persisted practice request
+after the measurement window, using resource-version and value checks. This
+prevents a completed `wipe-node` trigger replaying when a node boots. The private
+pre-cleanup queue snapshot is retained; Agent specifications, privileges and
+other operators' requests are never edited. Do not start another campaign while
+a request is still being observed.
+
+Read-path recovery and rolling availability have independent workflows:
+
+```sh
+python3 test/tester-agent/09-gateway-failover.py --vps --allow-changes --client-image-tag <imported-client-tag> --repeat 3
+python3 test/tester-agent/10-audit-recovery.py --vps --baseline <private-before-identities.txt.gz> --repeat 3
+python3 test/tester-agent/11-api-rollout.py --vps --allow-changes --repeat 3
+```
+
+`09` freezes a run-owned gateway's existing keep-alive connection and listener,
+then reads real canonical data through a candidate Client API and the healthy
+peer. Temporary workloads are removed; production gateways, databases and
+Sensor Pantai are unchanged. Endpoint convergence after an intentional temporary
+API restart is checked between rounds, never retried inside the fault request.
+`10` is read-only: every page must be complete, pagination must terminate, and
+every supplied pre-fault identity must remain visible. Failed/partial pages are
+retained; the test does not retry them into a passing result. `11` rolls only the
+production Client API while independently sampling Field reads without retrying
+transport failures. It does not delete data or change replica counts.
+
 Exam scenarios/keys are not inspected or required here.
 
 P5 critical-path verification has resumed. The two staged database clusters already exist

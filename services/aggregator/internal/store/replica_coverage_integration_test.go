@@ -125,3 +125,35 @@ func TestPostgresCoverageNeverCertifiesUnavailableReplica(t *testing.T) {
 		t.Fatalf("absence was falsely certified while a replica was unavailable: %+v %v", missing, err)
 	}
 }
+
+func TestPostgresAuditRefillsLargeStalePrefix(t *testing.T) {
+	s, databases, _ := integrationReplicas(t)
+	// One peer orders a stale version first; its latest version belongs at the
+	// tail. More than 4,000 rows keep every bounded refill non-exhausted.
+	for _, index := range s.destinations(0) {
+		_, err := databases[index].pool.Exec(t.Context(), `INSERT INTO hazard_events
+		 (hazard_id,source,source_ref_id,hazard_type,severity,area_name,latitude,longitude,
+		 occurred_at,ingested_at,attributes,partition_id,revision,ingestion_version)
+		 SELECT 'audit-'||lpad(i::text,6,'0'),'BMKG','audit-'||i,'SEISMIC','WASPADA','Padang',0,0,
+		 '2026-01-01'::timestamptz+i*interval '1 second',
+		 '2026-01-01'::timestamptz+i*interval '1 second','{}',0,1,1
+		 FROM generate_series(0,5999) AS i`)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := databases[s.destinations(0)[0]].pool.Exec(t.Context(), `UPDATE hazard_events
+	 SET ingested_at='2026-01-02',revision=2,ingestion_version=2 WHERE hazard_id='audit-000000'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.ListEvents(t.Context(), EventFilter{Audit: true, Limit: 1000})
+	if err != nil || page.Partial || !page.ReplicationDegraded || len(page.Events) != 1000 || page.NextCursor == nil {
+		t.Fatalf("large Audit prefix was not certified after bounded refill: count=%d status=%+v err=%v", len(page.Events), page.ReadStatus, err)
+	}
+	for i, event := range page.Events {
+		if event.HazardID != fmt.Sprintf("audit-%06d", i+1) {
+			t.Fatalf("stale prefix changed pagination at %d: %s", i, event.HazardID)
+		}
+	}
+}

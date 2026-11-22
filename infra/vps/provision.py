@@ -74,6 +74,7 @@ class Hosts:
     def provision(self, version=None):
         self.parallel(lambda n: self.ssh(n, 'sudo -n true; hostname; uname -r; nproc; free -m'))
         self.parallel(lambda n: self.script(n, 'base'))
+        self.parallel(lambda n: self.script(n, 'tester-tools'))
         public = {n['name']: self.ssh(n, 'sudo -n cat /etc/wireguard/aat.key | wg pubkey', capture=True).decode().strip()
                   for n in self.nodes}
         for n in self.nodes:
