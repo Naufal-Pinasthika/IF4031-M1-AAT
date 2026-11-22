@@ -1,6 +1,6 @@
 # Report-facing system tests
 
-`p1/`, `p3/`, `p4/` and `p5/` contain numbered report-facing E2E scenarios, not unit tests.
+`p1/` through `p5/` contain numbered report-facing E2E scenarios, not unit tests.
 Related assertions share a workflow: schema replay includes ordering and access
 control; delivery includes idempotency and hard crashes; stream recovery includes
 clustering, mutations, burst catch-up and baseline/fault equivalence.
@@ -110,6 +110,91 @@ use the currently deployed image. It does not rebuild or deploy images.
 60-second post-burst catch-up assertion is unchanged by that budget.
 
 ## Scenarios
+
+### P2 capacity and polling
+
+For the provisioned external generator, use the same controller with:
+
+```sh
+python3 test/p2/01-capacity.py --vps --generator-vps --allow-changes --mode scale --vus 10000 --seconds 120 --repeat 1 --max-rss-mib 6144
+python3 test/p2/01-capacity.py --vps --generator-vps --allow-changes --mode throughput --vus 1000 --seconds 60 --repeat 2 --max-rss-mib 6144
+python3 test/p2/02-network.py --vps --allow-changes --repeat 3
+python3 test/p2/03-profile.py --vps --allow-changes --repeat 1
+python3 test/p2/04-generator.py --vps --allow-changes --repeat 1
+```
+
+These run k6 as the separate VPS's SSH user, outside Kubernetes, directly over
+WireGuard. Linux-only generator monitoring replaces the laptop memory guard;
+the laptop still controls scaling, collects upstream evidence and restores the
+original replica count. The API key travels over SSH stdin and is not put in
+command arguments, copied `.env` files or result artifacts. Each remote worker
+has its own deadline and private working directory. This option supersedes the
+SSH-forwarded laptop path below for high-concurrency verification.
+`--reverse-first --repeat 1` measures the counterbalancing 3→1 pair separately;
+completed case summaries and the initial polling boundary are saved immediately
+so an interrupted controller does not erase earlier evidence.
+
+`03-profile` captures a 20-second CPU profile from k6 and each Ready gateway and
+Aggregator during the unchanged 1,000-VU, 60-second workload. App profiling is
+temporarily enabled on pod loopback only and restored in `finally`; k6 profiling
+binds only the external generator's loopback. This requires two scoped app
+rollouts to enable/restore profiling, but does not change images, budgets, data
+or replica counts. Profiles are private diagnostic evidence, not acceptance
+measurements. Inspect them with `go tool pprof -top <profile>`.
+The external worker defaults to `--generator-procs 6 --generator-gogc 100`.
+Runtime experiments may set these explicitly (for example, `8` and `300` on
+the 8-vCPU generator), identically for both replica counts. The settings and
+peak RSS are retained; memory safety stops and full JSON validation still
+apply. Label runtime experiments separately from application design changes.
+
+`04-generator` cross-builds a small Linux HTTP fixture using Windows Go (run
+the Python controller in WSL), snapshots the exact complete 20-event response,
+and serves that snapshot from a temporary authenticated listener on A's private
+WireGuard IP. It uses the same k6 workload and full-body checks for 60 seconds.
+The fixture exits after at most 95 seconds, is stopped in `finally` when its
+process identity still matches, and never replaces a Kubernetes service.
+This calibrates the generator plus private network/fixture path; it does not
+isolate generator CPU from network capacity and is **not application throughput
+or P2 acceptance**. No credentials are written into the fixture or its files.
+
+`02-network` measures an eight-second single-TCP-flow transfer from A to the
+generator over WireGuard, only when no k6 is active. Its temporary listener binds
+only A's private address, closes after each round and has a 25-second watchdog;
+no public listener or persistent firewall change is created. This is transport
+diagnosis, not a P2 pass or proof of a provider's bandwidth cap. Run it separately
+from application load testing.
+
+Run sequentially from the laptop against the VPS lab:
+
+```sh
+python3 test/tester-agent/02-polling-failover.py --vps --allow-changes --repeat 3
+python3 test/p2/01-capacity.py --vps --allow-changes --mode throughput --vus 1000 --seconds 60 --repeat 2
+python3 test/p2/01-capacity.py --vps --allow-changes --mode scale --vus 10000 --seconds 120 --repeat 1
+```
+
+Capacity uses the `scripts/m2/p2/` k6 workloads through four private SSH tunnels
+to the **same** gateway NodePort (`--tunnels` changes only the transport count).
+`AGGREGATOR_BASE_URLS` assigns VUs evenly across these local tunnel endpoints;
+it does not route directly to pods or change requests, pacing or thresholds.
+This distributes channels across processes, but does not guarantee SSH can
+carry 10,000 VUs. A tunnel exit invalidates the campaign; use a direct private
+VPN route for a conclusive high-concurrency measurement if SSH saturates.
+Throughput alternates 1→3 and 3→1, with 10 seconds of
+stabilization and identical VUs, payload and duration. Only complete responses
+count toward the ≥2× ratio; 429, partial and malformed results do not. Scaling
+holds 10,000 VUs for 120 seconds, requests 3→5→2 replicas and requires both changed
+counts to become Ready during load. The original replica count is restored
+afterward, including on failure. No volume, source state or image is reset.
+
+The runner retains k6 summaries, server/node resource samples, replica timelines
+and correlated mock polling evidence. Laptop memory safety uses the existing
+Linux/Windows guard; a safety stop is a failed/incomplete campaign, never a pass.
+Its own file-descriptor limit is raised to 65,536 before opening the SSH tunnel;
+this does not change machine-wide limits, application budgets or the workload.
+SSH transport, laptop capacity and WAN remain part of this measurement path;
+this is not an isolated server-capacity benchmark. These tests do not change
+node clocks, freeze VMs or prove a new-version rolling update, and cannot alone
+establish all P2 criteria.
 
 ### P5 sequence
 

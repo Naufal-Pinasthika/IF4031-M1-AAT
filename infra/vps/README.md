@@ -1,5 +1,32 @@
 # Existing VPS deployment
 
+## External load generator
+
+The optional `load_generator` object in the private inventory describes a
+fourth VPS, not a Kubernetes node. It uses the same operator SSH key and its
+own WireGuard identity, generated on that host and never downloaded.
+
+```sh
+python3 infra/vps/provision-load.py
+python3 infra/vps/provision-load.py --apply
+```
+
+Provisioning pins k6 1.4.2 for comparison with the laptop, using Grafana's signed
+APT repository. It enables a dedicated WireGuard link to A at `10.77.0.10`,
+allows only the relevant peer's public UDP traffic, preserves existing firewall
+rules and does not restart A's VPN. A protected pre-change configuration copy
+remains on A. The generator routes only A's private address through this peer;
+application/database public ports remain closed. No Kubernetes, Docker or
+database is installed on the generator.
+
+Run report-facing tests from [`test/`](../../test/README.md) with
+`--generator-vps`. SSH carries control and evidence; k6 sends HTTP directly over
+WireGuard to the common gateway NodePort, never to individual Aggregator pods.
+Generator jobs run as the SSH user, receive only the needed API key over SSH
+stdin, enforce a bounded runtime/memory guard and keep private per-run files.
+Do not copy the operator private SSH key, cluster secrets or entire `.env`
+onto the generator. Provisioning alone is not a P2 acceptance pass.
+
 For script selection and side effects, see the [script catalog](SCRIPTS.md).
 For the restored source versus live-runtime boundary, see the
 [status page](../../docs/status/README.md). Documentation cleanup does not
