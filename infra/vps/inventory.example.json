@@ -1,5 +1,11 @@
 {
   "key": "/home/YOUR_USER/.ssh/aat.pem",
+  "load_generator": {
+    "name": "aat-load",
+    "host": "LOAD_GENERATOR_PUBLIC_IP",
+    "user": "ubuntu",
+    "private_ip": "10.77.0.10"
+  },
   "nodes": [
     {"name": "aat-vps-a", "host": "NODE_A_PUBLIC_IP", "user": "ubuntu", "private_ip": "10.77.0.1", "role": "server"},
     {"name": "aat-vps-b", "host": "NODE_B_PUBLIC_IP", "user": "ubuntu", "private_ip": "10.77.0.2", "role": "agent"},

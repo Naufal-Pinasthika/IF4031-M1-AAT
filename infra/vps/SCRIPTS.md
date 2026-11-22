@@ -15,6 +15,7 @@ remain beside their services, and `scripts/` demonstrations remain available.
 | File | Purpose | Effects |
 | --- | --- | --- |
 | [provision.py](provision.py) | Configure existing VPSs | Changes host packages, firewall, WireGuard, and Kubernetes. Does not purchase servers. |
+| [provision-load.py](provision-load.py) | Prepare an external k6 host | Plan by default; installs pinned k6 and WireGuard on `inventory.load_generator`, adds one persistent peer/UDP firewall allowance on A without restarting its VPN; no Kubernetes, database or application deployment. |
 | [host.sh](host.sh) | Privileged provisioning helper | Changes host configuration for the selected action. |
 | [deploy.py](deploy.py) | Full build/import/application deployment | Syncs sources and configuration, builds/imports images, and changes Kubernetes resources. `--provision` also configures hosts. |
 | [build.sh](build.sh) | Build/export/import images on A | Consumes remote CPU/disk and writes image archives. |
