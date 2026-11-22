@@ -115,11 +115,12 @@ func matchesRecord(e model.HazardEvent, f EventFilter, c *pageCursor) bool {
 
 func (s *Store) readReplicaUnion(ctx context.Context, partition int, f EventFilter, c *pageCursor, limit int, query string, args []any) ([]model.HazardEvent, ReadStatus, error) {
 	requested, fetch := limit, limit
+	maxFetch := max(1000, requested*4)
 	for attempt := 0; ; attempt++ {
 		boundedArgs := append([]any(nil), args...)
 		boundedArgs[len(boundedArgs)-1] = fetch
-		events, status, err := s.readReplicaPage(ctx, partition, f, c, fetch, query, boundedArgs)
-		if err != nil || !status.coverageIncomplete || attempt >= 2 || fetch >= max(1000, requested) {
+		events, status, err := s.readReplicaPage(ctx, partition, f, c, fetch, requested, query, boundedArgs)
+		if err != nil || !status.coverageIncomplete || attempt >= 2 || fetch >= maxFetch {
 			if len(events) > requested {
 				events = events[:requested]
 			}
@@ -128,11 +129,11 @@ func (s *Store) readReplicaUnion(ctx context.Context, partition int, f EventFilt
 		// Latest-version reconciliation can remove stale matching candidates.
 		// Fetch a larger prefix instead of returning a falsely complete page.
 		// Three rounds and the caller's fill deadline keep work bounded.
-		fetch = min(fetch*2, max(1000, requested))
+		fetch = min(fetch*2, maxFetch)
 	}
 }
 
-func (s *Store) readReplicaPage(ctx context.Context, partition int, f EventFilter, c *pageCursor, limit int, query string, args []any) ([]model.HazardEvent, ReadStatus, error) {
+func (s *Store) readReplicaPage(ctx context.Context, partition int, f EventFilter, c *pageCursor, limit, requested int, query string, args []any) ([]model.HazardEvent, ReadStatus, error) {
 	type response struct {
 		unit *unit
 		rows []record
@@ -269,7 +270,9 @@ func (s *Store) readReplicaPage(ctx context.Context, partition int, f EventFilte
 		if len(result.rows) < limit {
 			continue
 		} // exhausted matching rows
-		if len(events) < limit || eventBefore(result.rows[len(result.rows)-1].event, events[limit-1], f.Audit) {
+		// A refill proves the caller's prefix, not the enlarged internal page.
+		// Requiring coverage of the latter moves the goalpost on every refill.
+		if len(events) < requested || eventBefore(result.rows[len(result.rows)-1].event, events[requested-1], f.Audit) {
 			s.logReadPartial(ctx, "coverage_unproven", "coverage", result.unit.name, partition, limit, nil)
 			status.Partial = true
 			status.coverageIncomplete = true
