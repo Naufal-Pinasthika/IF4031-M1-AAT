@@ -28,3 +28,6 @@ coverage.out
 !/docs/changelog/verification-2026-11-19.md
 /infra/vps/*-20??-??-??.md
 /scripts/m2/e2e/retest-20??-??-??.md
+
+# Private SSH key used by local VPS inventory
+/aat2

@@ -23,8 +23,11 @@ class StorageSandbox(Sandbox):
             h = self.h
             backend = self.resource('Service', self.name + '-backends', spec={'clusterIP': 'None',
                 'selector': {'app': self.name + '-agg'}, 'ports': [{'port': 8083, 'targetPort': 8083}]})
-            images = json.loads(h.kube('get', 'daemonset', 'aggregator-gateway', '-o', 'json'))
-            image = images['spec']['template']['spec']['containers'][0]['image']
+            # p1: gateway controllers may be Deployments or DaemonSets; use a Ready pod.
+            gateways = [pod for pod in h.pods().values()
+                        if pod['app'] == 'aggregator-gateway' and pod['ready']]
+            h.check(bool(gateways), 'A Ready gateway pod supplies the test image')
+            image = gateways[0]['images'][0]
             gateway, service = self.deployment(self.name + '-gateway', 'api', image, 8083,
                 [{'name': 'AGGREGATOR_BACKEND_DNS', 'value': self.name + '-backends.' + NS + '.svc.cluster.local'},
                  {'name': 'GATEWAY_REPLICAS', 'value': '2'}], command=['/app/gateway'],
