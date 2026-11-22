@@ -95,7 +95,7 @@ def runtime_resources(values):
                                   "COASTAL_URL": "http://sensor-pantai:8080",
                                   "KAFKA_BROKERS": "kafka:9092", "AGGREGATOR_LISTEN_ADDRESS": ":8083"})
     configs["auth"]["AUTH_LISTEN_ADDRESS"] = ":8084"
-    configs["client-api"].update({"AGGREGATOR_URL": "http://aggregator-gateways:8083",
+    configs["client-api"].update({"AGGREGATOR_URL": "http://aggregator:8083",
                                   "AUTH_JWKS_URL": "http://auth:8084/.well-known/jwks.json"})
     for name, prefix, port, filename in (
         ("dashboard-consumer", "DASHBOARD", 8085, "dashboard.db"),
@@ -222,6 +222,14 @@ def main():
                         "patch": json.dumps([{"op": "add", "path": "/spec/template/metadata/annotations",
                                               "value": {"bnpb/config-sha256": checksum}}]),
                     })
+                settings = [obj for obj in runtime if obj["metadata"]["name"] in
+                            ("aggregator-config", "aggregator-credentials")]
+                checksum = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
+                overlay["patches"].append({
+                    "target": {"kind": "DaemonSet", "name": "aggregator-gateway"},
+                    "patch": json.dumps([{"op": "add", "path": "/spec/template/metadata/annotations",
+                                          "value": {"bnpb/config-sha256": checksum}}]),
+                })
             if args.storage_class and stage != "jobs":
                 overlay.setdefault("patches", []).append({
                     "target": {"kind": "StatefulSet"},

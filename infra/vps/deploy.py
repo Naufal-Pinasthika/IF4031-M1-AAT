@@ -38,6 +38,9 @@ def services():
                        'metadata': {'name': name + '-vps', 'namespace': NS},
                        'spec': {'type': 'NodePort', 'selector': {'app': backend},
                                 'ports': [{'port': port, 'targetPort': port, 'nodePort': nodeport}]}})
+        if backend == 'aggregator-gateway':
+            result[-1]['spec'].update(trafficDistribution='PreferSameNode',
+                                     externalTrafficPolicy='Cluster', internalTrafficPolicy='Cluster')
     return {'apiVersion': 'v1', 'kind': 'List', 'items': result}
 
 

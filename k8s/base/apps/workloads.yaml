@@ -171,6 +171,7 @@ kind: Service
 metadata:
   name: aggregator
 spec:
+  trafficDistribution: PreferSameNode
   selector:
     app: aggregator-gateway
   ports:

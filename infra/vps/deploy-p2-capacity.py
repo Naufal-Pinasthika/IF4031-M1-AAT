@@ -41,7 +41,9 @@ def main():
         return h.ssh(a,'sudo -n k3s kubectl --request-timeout=180s -n '+NS+' '+shlex.join(args),payload,capture=True).decode()
     old=json.loads(kube('get','deployment/aggregator','-o','json'))
     image=old['spec']['template']['spec']['containers'][0]['image']
-    gateway_raw=kube('get','deployment/aggregator-gateway','--ignore-not-found','-o','json').strip()
+    if kube('get','deployment/aggregator-gateway','--ignore-not-found','-o','name').strip():
+        raise RuntimeError('Migrate the legacy gateway Deployment using deploy-k8s.sh before a capacity-only rollout')
+    gateway_raw=kube('get','daemonset/aggregator-gateway','-o','json').strip()
     previous_gateway=json.loads(gateway_raw) if gateway_raw else None
     services={name:json.loads(kube('get','service/'+name,'-o','json'))['spec']['selector'] for name in ('aggregator','aggregator-vps')}
     config=json.loads(kube('get','configmap/aggregator-config','-o','json'))['data']
@@ -75,13 +77,13 @@ def main():
     resources=list(yaml.safe_load_all((ROOT/'k8s/base/apps/gateway.yaml').read_text()))
     for obj in resources:
         obj['metadata']['namespace']=NS
-        if obj['kind']=='Deployment':obj['spec']['template']['spec']['containers'][0]['image']='aat/aggregator:'+tag
+        if obj['kind']=='DaemonSet':obj['spec']['template']['spec']['containers'][0]['image']='aat/aggregator:'+tag
     try:
         kube('patch','configmap/aggregator-config','--type=merge','-p',json.dumps({'data':keys}))
         kube('set','image','deployment/aggregator','aggregator=aat/aggregator:'+tag)
         print(kube('rollout','status','deployment/aggregator','--timeout=180s'),flush=True)
         kube('apply','-f','-',payload=json.dumps({'apiVersion':'v1','kind':'List','items':resources}).encode())
-        print(kube('rollout','status','deployment/aggregator-gateway','--timeout=180s'),flush=True)
+        print(kube('rollout','status','daemonset/aggregator-gateway','--timeout=180s'),flush=True)
         for name in services:
             kube('patch','service/'+name,'--type=merge','-p',json.dumps({'spec':{'selector':{'app':'aggregator-gateway'}}}))
         state['passed']=True
@@ -92,8 +94,8 @@ def main():
         kube('set','image','deployment/aggregator','aggregator='+image)
         print(kube('rollout','status','deployment/aggregator','--timeout=180s'),flush=True)
         if previous_gateway:
-            kube('set','image','deployment/aggregator-gateway','aggregator-gateway='+state['previous_gateway_image'])
-            print(kube('rollout','status','deployment/aggregator-gateway','--timeout=180s'),flush=True)
+            kube('set','image','daemonset/aggregator-gateway','aggregator-gateway='+state['previous_gateway_image'])
+            print(kube('rollout','status','daemonset/aggregator-gateway','--timeout=180s'),flush=True)
         state['rolled_back']=True
         raise
     finally:

@@ -184,7 +184,10 @@ for name, group in [('core-apps', others), ('sensor-app', sensor)]:
     (directory / (name + '.json')).write_text(json.dumps({'apiVersion':'v1', 'kind':'List', 'items':group}))
 PY
 "${kube[@]}" apply -f "${render_dir}/core-apps.json"
-for service in aggregator aggregator-gateway auth bmkg client-api pvmbg; do
+"${kube[@]}" -n "${NAMESPACE}" rollout status daemonset/aggregator-gateway --timeout="${timeout}"
+# Remove only the obsolete controller after its per-node replacement is ready.
+"${kube[@]}" -n "${NAMESPACE}" delete deployment aggregator-gateway --ignore-not-found --wait=true --timeout="${timeout}"
+for service in aggregator auth bmkg client-api pvmbg; do
   "${kube[@]}" -n "${NAMESPACE}" rollout status "deployment/${service}" --timeout="${timeout}"
 done
 for service in dashboard-consumer notifier-consumer; do
