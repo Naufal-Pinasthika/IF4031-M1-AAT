@@ -25,7 +25,8 @@ export const options = {
 };
 
 export default function () {
-  const base = __ENV.AGGREGATOR_BASE_URL || 'http://127.0.0.1:8083';
+  const targets = (__ENV.AGGREGATOR_BASE_URLS || __ENV.AGGREGATOR_BASE_URL || 'http://127.0.0.1:8083').split(',');
+  const base = targets[(__VU - 1) % targets.length];
   const response = http.get(`${base}/internal/events?limit=20`, {
     headers: {
       'X-Aggregator-Key': __ENV.AGGREGATOR_API_KEY,
