@@ -12,8 +12,10 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -38,6 +40,7 @@ type Server struct {
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "client-api")
+	slog.SetDefault(logger)
 	aggregatorURL := os.Getenv("AGGREGATOR_URL")
 	aggregatorKey := os.Getenv("AGGREGATOR_API_KEY")
 	jwksURL := os.Getenv("AUTH_JWKS_URL")
@@ -136,19 +139,16 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 	}
 	logger.Info("client_api_server_started", "address", ":8080")
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	drained := shutdownHTTP(ctx, httpServer, 35*time.Second)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		logger.Error("client_api_server_stopped", "error", err)
 		os.Exit(1)
 	}
-}
-
-func newAggregatorClient(maxInFlight int) *http.Client {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConns = maxInFlight
-	transport.MaxIdleConnsPerHost = maxInFlight
-	transport.MaxConnsPerHost = maxInFlight
-	// p1: analytical scans can span several canonical pages.
-	return &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	if err := <-drained; err != nil {
+		logger.Error("client_api_drain_failed", "error", err)
+	}
 }
 
 func (s *Server) protect(next http.HandlerFunc) http.HandlerFunc {

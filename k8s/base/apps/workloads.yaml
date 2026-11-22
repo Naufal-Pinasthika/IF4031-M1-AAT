@@ -404,6 +404,11 @@ metadata:
   name: client-api
 spec:
   replicas: 1
+  minReadySeconds: 5
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: client-api
@@ -413,6 +418,7 @@ spec:
         app: client-api
         role: api
     spec:
+      terminationGracePeriodSeconds: 45
       # p1: keep services without HA available when a storage worker is lost.
       affinity:
         nodeAffinity:
@@ -426,6 +432,10 @@ spec:
       - name: client-api
         image: aat/client-api:m2-dev
         imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command: [/bin/sh, -c, sleep 5]
         envFrom:
         - configMapRef:
             name: client-api-config
