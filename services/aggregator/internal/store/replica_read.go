@@ -161,6 +161,7 @@ func (s *Store) readReplicaPage(ctx context.Context, partition int, f EventFilte
 	union := map[string]record{}
 	var successful []response
 	busy := false
+	var timedOut []*unit
 	for range dest {
 		result := <-responses
 		if result.err != nil || result.rows == nil {
@@ -170,6 +171,7 @@ func (s *Store) readReplicaPage(ctx context.Context, partition int, f EventFilte
 			if result.err != nil {
 				if budgetError(result.err) {
 					busy = true
+					timedOut = append(timedOut, result.unit)
 				} else if availabilityError(result.err) {
 					s.markDown(result.unit)
 				} else {
@@ -190,7 +192,26 @@ func (s *Store) readReplicaPage(ctx context.Context, partition int, f EventFilte
 		return nil, status, ctx.Err()
 	}
 	if len(successful) == 0 && busy {
-		return nil, status, ErrStorageBusy
+		// A query deadline alone cannot distinguish local admission pressure
+		// from an unreachable replica. Confirm through the independent pool:
+		// reachable-but-busy still rejects; failed liveness permits an explicit
+		// partial union from the other partitions, never a complete empty page.
+		checks := make(chan bool, len(timedOut))
+		for _, u := range timedOut {
+			go func() {
+				op, cancel := context.WithTimeout(ctx, min(s.timeout, 100*time.Millisecond))
+				defer cancel()
+				checks <- u.probe.Ping(op) == nil
+			}()
+		}
+		for range timedOut {
+			if <-checks {
+				return nil, status, ErrStorageBusy
+			}
+		}
+		if ctx.Err() != nil {
+			return nil, status, ctx.Err()
+		}
 	}
 	// A newer peer version might no longer match a severity/time filter. Fetch
 	// candidates absent from that peer's filtered page BEFORE choosing versions;

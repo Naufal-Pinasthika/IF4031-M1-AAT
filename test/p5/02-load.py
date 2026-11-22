@@ -18,7 +18,20 @@ def field_logs(h, ordinal):
         return
     path=h.folder/f'round-{ordinal}-field-path.log'
     selector='app in (auth,client-api,aggregator-gateway,aggregator)'
-    count=len(json.loads(h.kube('get','pods','-l',selector,'-o','json'))['items'])
+    pods=json.loads(h.kube('get','pods','-l',selector,'-o','json'))['items']
+    # A fresh gateway can be healthy without ever logging a business request.
+    # Seed a harmless read before tailing, so every stream has an initial row.
+    for pod in pods:
+        if pod['metadata']['labels'].get('app') != 'aggregator-gateway':
+            continue
+        address=pod['status']['podIP']
+        command=shlex.join(['curl','--silent','--show-error','--max-time','5',
+            '--output','/dev/null','--write-out','%{http_code}',
+            '-H','X-Correlation-ID: log-preflight-'+h.run_id,
+            'http://'+address+':8083/version'])
+        status=h.hosts.ssh(h.server,command,capture=True).decode().strip()
+        h.check(status in ('200','401'), 'Each fresh gateway accepts the harmless log preflight read')
+    count=len(pods)
     # Drop each pod's initial tail record, then acknowledge that ALL selected
     # streams are subscribed before starting k6. Old run records are not evidence.
     filter_script=(f'!seen[$1]++ {{ ready++; if (ready=={count}) {{ print "AAT_LOG_STREAM_READY"; fflush() }}; next }} '

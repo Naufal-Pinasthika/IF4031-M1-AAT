@@ -54,6 +54,7 @@ type Gateway struct {
 	mu                                        sync.RWMutex
 	nodes                                     map[string]*backend
 	transport                                 *http.Transport
+	readTransport                             *http.Transport
 	probeTransport                            *http.Transport
 	backendRegular, backendField              int
 	logger                                    *slog.Logger
@@ -82,7 +83,11 @@ func New(logger *slog.Logger, keys ...string) *Gateway {
 	probeTransport := transport.Clone()
 	probeTransport.MaxConnsPerHost = 2
 	probeTransport.MaxIdleConnsPerHost = 2
-	g := &Gateway{nodes: map[string]*backend{}, transport: transport, probeTransport: probeTransport, backendRegular: 48, backendField: 16, logger: logger, slots: make(chan struct{}, 1024), regularSlots: make(chan struct{}, 768), queueWait: 100 * time.Millisecond}
+	readTransport := transport.Clone()
+	// Bound each safe-read attempt; the caller's context bounds all attempts.
+	// Writes and analytical scans retain the original transport budget.
+	readTransport.ResponseHeaderTimeout = 800 * time.Millisecond
+	g := &Gateway{nodes: map[string]*backend{}, transport: transport, readTransport: readTransport, probeTransport: probeTransport, backendRegular: 48, backendField: 16, logger: logger, slots: make(chan struct{}, 1024), regularSlots: make(chan struct{}, 768), queueWait: 100 * time.Millisecond}
 	if len(keys) > 0 {
 		g.apiKey = keys[0]
 	}
@@ -123,39 +128,43 @@ type upstreamBudget struct {
 }
 
 func (t upstreamBudget) RoundTrip(r *http.Request) (*http.Response, error) {
-	response, err := t.roundTrip(r)
-	var network *net.OpError
-	if err == nil || r.Context().Err() != nil ||
-		(r.Method != http.MethodGet && r.Method != http.MethodHead) ||
-		(r.Body != nil && r.Body != http.NoBody) ||
-		!errors.As(err, &network) || network.Op != "dial" {
-		return response, err
-	}
-	// Only connection establishment failed: no HTTP bytes were sent. Never
-	// replay writes, application responses, queue rejections or partial bodies.
-	t.backend.healthy.Store(false)
-	priority := t.gateway.fieldRequest(r)
-	next := t.gateway.pickClassAvoid(&priority, t.backend)
-	if next == nil {
-		return nil, err
-	}
-	retry := r.Clone(r.Context())
-	retry.URL.Host = next.host
-	t.gateway.readFailovers.Add(1)
-	t.gateway.logger.Warn("gateway_read_failover", "correlation_id", r.Header.Get("X-Correlation-ID"),
-		"failed_backend", t.backend.host, "retry_backend", next.host, "error", err)
-	response, err = (upstreamBudget{t.gateway, next}).roundTrip(retry)
-	if err != nil {
-		next.active.Add(-1)
-		if r.Context().Err() == nil && errors.As(err, &network) && network.Op == "dial" {
-			next.healthy.Store(false)
+	current := t.backend
+	for attempt := 0; ; attempt++ {
+		request := r.Clone(r.Context())
+		request.URL.Host = current.host
+		response, err := (upstreamBudget{t.gateway, current}).roundTrip(request)
+		if attempt > 0 {
+			if err == nil {
+				selected := current
+				response.Body = &budgetBody{ReadCloser: response.Body, release: func() { selected.active.Add(-1) }}
+			} else {
+				current.active.Add(-1)
+			}
 		}
-		return nil, err
+		var network net.Error
+		if err == nil || r.Context().Err() != nil ||
+			(r.Method != http.MethodGet && r.Method != http.MethodHead) ||
+			(r.Body != nil && r.Body != http.NoBody) ||
+			(!errors.As(err, &network) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF)) {
+			return response, err
+		}
+		// Two peers can become unreachable in the same partition. Bound a
+		// safe read to three total attempts, all inside the caller's deadline.
+		// Never replay writes, application responses, queue rejection or bodies.
+		current.healthy.Store(false)
+		if attempt >= 2 {
+			return nil, err
+		}
+		priority := t.gateway.fieldRequest(r)
+		next := t.gateway.pickClassAvoid(&priority, current)
+		if next == nil {
+			return nil, err
+		}
+		t.gateway.readFailovers.Add(1)
+		t.gateway.logger.Warn("gateway_read_failover", "correlation_id", r.Header.Get("X-Correlation-ID"),
+			"failed_backend", current.host, "retry_backend", next.host, "error", err)
+		current = next
 	}
-	// Keep least-active accounting until the response body is consumed, not
-	// merely until headers arrive. The per-backend body budget remains intact.
-	response.Body = &budgetBody{ReadCloser: response.Body, release: func() { next.active.Add(-1) }}
-	return response, nil
 }
 
 func (t upstreamBudget) roundTrip(r *http.Request) (*http.Response, error) {
@@ -176,7 +185,12 @@ func (t upstreamBudget) roundTrip(r *http.Request) (*http.Response, error) {
 	m.active.Add(1)
 	release := func() { <-slots; m.active.Add(-1) }
 	began = time.Now()
-	response, err := t.gateway.transport.RoundTrip(r)
+	transport := t.gateway.transport
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+		(r.Body == nil || r.Body == http.NoBody) && r.URL.Path != "/internal/analytics" {
+		transport = t.gateway.readTransport
+	}
+	response, err := transport.RoundTrip(r)
 	m.headers.observe(time.Since(began))
 	if err != nil {
 		release()
@@ -298,6 +312,7 @@ func (g *Gateway) Discover(ctx context.Context, name string) {
 		select {
 		case <-ctx.Done():
 			g.transport.CloseIdleConnections()
+			g.readTransport.CloseIdleConnections()
 			g.probeTransport.CloseIdleConnections()
 			return
 		case <-time.After(time.Second):

@@ -1,25 +1,12 @@
 from pathlib import Path
 import datetime as dt
 import json
-import re
 import sys
-import time
 import urllib.parse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
-from common import parser, run, Failure, Inconclusive
-
-
-def agent_rows(raw):
-    rows = []
-    for line in raw.splitlines():
-        match = re.search(r'\{.*$', line)
-        if match:
-            try:
-                rows.append(json.loads(match[0]))
-            except ValueError:
-                pass
-    return rows
+from common import parser, run, Inconclusive
+from tester_agent import practice
 
 
 def mock_mode(items):
@@ -54,23 +41,7 @@ def scenario(h):
             before = h.pods()
             ordinal = h.sql('SELECT to_json(COALESCE(max(ordinal),0)) FROM durable_inbox')
             since = h.sql('SELECT to_json(clock_timestamp())')
-            raw = h.kube('-n', 'tester-agent', 'exec', 'daemonset/tester-agent', '--', '/app', 'run', 'practice', 'schema')
-            h.artifact(f'round-{repetition+1}-submission.json', {'output': raw})
-            end = time.monotonic()+h.args.timeout
-            while True:
-                logs = h.kube('-n', 'tester-agent', 'logs', '-l', 'app=tester-agent', '--since-time='+since,
-                              '--prefix', '--tail=200', '--max-log-requests=3')
-                rows = agent_rows(logs)
-                began = any('skenario "schema"' in r.get('action', '') for r in rows)
-                finished = any('pemulihan akhir selesai' in r.get('action', '') for r in rows)
-                if began and finished:
-                    break
-                if time.monotonic() >= end:
-                    h.artifact(f'round-{repetition+1}-agent.json', {'log': logs})
-                    raise Failure('Official schema practice did not report completion')
-                h.request('aggregator', '/ready')
-                time.sleep(2)
-            h.artifact(f'round-{repetition+1}-agent.json', {'log': logs})
+            rows = practice(h, 'schema', repetition+1)['actions']
             raw_mock = h.kube('logs', 'deployment/pvmbg', '--since-time='+since)
             h.artifact(f'round-{repetition+1}-pvmbg.json', {'log': raw_mock})
             admin = []

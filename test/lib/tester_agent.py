@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
 import json
 import re
 import shlex
@@ -17,6 +18,10 @@ def logs(h, tolerate_unavailable=False):
         if not tolerate_unavailable:
             raise
         return 'Agent logs temporarily unavailable', []
+    return raw, parse_logs(raw)
+
+
+def parse_logs(raw):
     rows = []
     for line in raw.splitlines():
         match = re.search(r'^(.*?)\s*(\{.*)$', line)
@@ -27,7 +32,31 @@ def logs(h, tolerate_unavailable=False):
                 rows.append(row)
             except ValueError:
                 pass
-    return raw, rows
+    return rows
+
+
+@contextmanager
+def follow_logs(h, prefix):
+    pods = json.loads(h.kube('-n', 'tester-agent', 'get', 'pods', '-l', 'app=tester-agent', '-o', 'json'))['items']
+    count = len(pods)
+    path = h.folder/(prefix+'-agent-live.log')
+    script = ('!seen[$1]++ { ready++; if (ready=='+str(count)+') { print "AAT_AGENT_STREAM_READY"; fflush() } } '
+              '{ print; fflush() }')
+    command = ('timeout '+str(h.args.timeout+60)+'s sudo -n k3s kubectl -n tester-agent logs '
+        '-l app=tester-agent --prefix --tail=1 --follow --max-log-requests='+str(count)+
+        ' --ignore-errors=true | awk '+shlex.quote(script))
+    with path.open('wb') as output:
+        process = subprocess.Popen(h.hosts.command(h.server, command, multiplex=False), stdout=output, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic()+20
+            while 'AAT_AGENT_STREAM_READY' not in path.read_text(errors='replace'):
+                h.check(process.poll() is None and time.monotonic()<deadline,
+                        'All original Agent log streams attach before the fault is submitted')
+                time.sleep(.1)
+            yield path
+        finally:
+            process.terminate()
+            process.wait(timeout=15)
 
 
 def identity(row):
@@ -88,7 +117,7 @@ def cleanup_practice_request(h, request_id, name, prefix):
     patch = [{'op': 'test', 'path': '/metadata/resourceVersion', 'value': current['metadata']['resourceVersion']},
              {'op': 'test', 'path': '/data/run', 'value': raw}, {'op': 'remove', 'path': '/data/run'}]
     h.kube('-n', 'tester-agent', 'patch', 'configmap/tester-run', '--type=json', '-p', json.dumps(patch))
-    h.note({'practice_cleanup': 'removed own persistent trigger after observation', 'id': request_id,
+    h.note({'practice_cleanup': 'retired own exact persistent trigger', 'id': request_id,
             'agent_spec_changed': False})
 
 
@@ -123,7 +152,10 @@ def practice(h, name, round_number):
     stable_since = None
     ready_after_fault = False
     request_id = None
+    lost_nodes, queue_cleaned = set(), False
+    streams = ExitStack()
     try:
+        live = streams.enter_context(follow_logs(h, prefix))
         submission = subprocess.run(h.hosts.command(h.server, shlex.join(command)), capture_output=True, timeout=30)
         (h.folder/(prefix+'-submission.log')).write_bytes(submission.stdout+submission.stderr)
         match = re.search(rb'Permintaan ([0-9a-f]+) dikirim', submission.stdout)
@@ -132,6 +164,7 @@ def practice(h, name, round_number):
         h.check(request_id is not None, 'The official submission identifies this campaign request for safe cleanup')
         while time.monotonic()-started < h.args.timeout:
             raw, rows = logs(h, tolerate_unavailable=True)
+            rows += parse_logs(live.read_text(errors='replace'))
             for row in rows:
                 key = identity(row)
                 if key in seen:
@@ -145,6 +178,22 @@ def practice(h, name, round_number):
                 if row['agent'] in started_agents and 'pemulihan akhir selesai' in action:
                     cleaned_agents.add(row['agent'])
             completed = bool(started_agents) and started_agents <= cleaned_agents
+            if name == 'wipe-node' and began:
+                nodes = json.loads(h.kube('get', 'nodes', '-o', 'json'))['items']
+                offline = {n['metadata']['name'] for n in nodes if not any(
+                    c['type']=='Ready' and c['status']=='True' for c in n['status'].get('conditions', []))}
+                if offline:
+                    lost_nodes.update(offline)
+                    if not queue_cleaned:
+                        # The destructive stimulus has ended with a powered-off
+                        # node. Retire this exact request BEFORE reintroduction
+                        # so boot cannot submit a second destructive stimulus.
+                        cleanup_practice_request(h, request_id, name, prefix)
+                        queue_cleaned = True
+                        h.note({'wipe_node_offline': sorted(lost_nodes), 'own_trigger_removed': True,
+                            'operator_action': 'Start the selected VPS in its provider panel; do not Rebuild',
+                            'scope': 'Planned P1 node reintroduction, not automatic provider power-on'})
+                completed = bool(lost_nodes)
             elapsed = time.monotonic()-started
             current_reads = samples[-2:]
             if elapsed >= next_hosts or completed:
@@ -163,19 +212,23 @@ def practice(h, name, round_number):
     finally:
         stop.set()
         observer.join(timeout=60)
+        streams.close()
         h.artifact(prefix+'-observation.json', {'scenario': name, 'before_pods': before,
             'actions': actions, 'samples': samples, 'hosts': host_samples,
-            'scenario_started': began, 'agent_cleanup_observed': completed,
+            'scenario_started': began, 'fault_end_observed': completed,
+            'agent_cleanup_observed': bool(started_agents) and started_agents <= cleaned_agents,
             'started_agents': sorted(started_agents), 'cleaned_agents': sorted(cleaned_agents),
             'application_recovered': ready_after_fault,
+            'lost_nodes': sorted(lost_nodes),
             'read_observer_stopped': not observer.is_alive(),
             'elapsed_seconds': time.monotonic()-started})
         # An Agent reboot can replay the persisted "go" trigger. Remove only
-        # our exact practice ID, after (never during) the measured fault window.
-        if request_id:
+        # our exact practice ID. Wipe retires it after power-off, before planned
+        # reintroduction; its read observer continues across the reboot.
+        if request_id and not queue_cleaned:
             cleanup_practice_request(h, request_id, name, prefix)
     h.check(not observer.is_alive(), 'Independent read observer stopped cleanly')
-    h.check(began and completed, 'Official '+name+' execution and cleanup were observed without manual intervention')
+    h.check(began and completed, 'Official '+name+' execution and fault-end were independently observed')
     failures = [row for row in actions if re.search(r'\bgagal\b|\berror\b', row.get('action', ''), re.I)]
     h.check(not failures, 'Agent did not report failed fault application or cleanup')
     h.check(ready_after_fault, 'Previously Ready pods and complete reads recovered stably within the observation deadline')
@@ -187,7 +240,7 @@ def practice(h, name, round_number):
             'agent_elapsed_seconds': time.monotonic()-started,
             'scope': 'Official practice execution, bounded read availability and pod recovery; not full P1/P2/P5 acceptance'})
     h.check(not bad, 'Every observed read returned a complete or explicitly partial page, never a 500 or hanging request')
-    return {'actions': actions, 'hosts_before': baseline_hosts, 'hosts_during': host_samples,
+    return {'actions': actions, 'lost_nodes': sorted(lost_nodes), 'hosts_before': baseline_hosts, 'hosts_during': host_samples,
             'hosts_after': after_hosts, 'before_pods': before, 'after_pods': after}
 
 

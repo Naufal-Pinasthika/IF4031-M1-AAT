@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from collections import Counter
 from pathlib import Path
 import gzip
 import hashlib
@@ -82,18 +83,52 @@ def scenario(h):
     h.check(h.args.vps, 'Destructive practice is restricted to the backed-up VPS lab')
     verify_backup(h)
     before = identities(h, 'before')
+    expected_ids = {row.rsplit('\t', 1)[1] for row in before}
+    def physical_copies(label):
+        copies, counts = Counter(), {}
+        for letter in 'abc':
+            rows = set(h.kube('exec', 'postgres-'+letter+'-0', '--', 'psql', '-U', 'postgres', '-d', 'aggregator',
+                '-At', '-c', "SELECT hazard_id FROM hazard_events WHERE source<>'SATELIT'").splitlines())
+            copies.update(rows)
+            counts[letter] = len(rows)
+        under = sorted(key for key in expected_ids if copies[key] < 2)
+        h.artifact(label+'-physical-copies.json', {'rows_by_store': counts,
+            'baseline_identities': len(expected_ids), 'fewer_than_two_copies': len(under),
+            'scope': 'Distinct physical PostgreSQL stores, not duplicate API rows'})
+        h.artifact(label+'-under-replicated.json', under)
+        return not under
+    h.check(physical_copies('before'), 'Every baseline identity has two physical copies before destructive practice')
+    def database_generations():
+        return {letter: h.kube('exec', 'postgres-'+letter+'-0', '--', 'psql', '-U', 'postgres', '-d', 'aggregator',
+            '-At', '-c', 'SELECT system_identifier FROM pg_control_system()').strip() for letter in 'abc'}
     for repetition in range(h.args.repeat):
-        result = practice(h, 'wipe-node', repetition+1)
-        h.check(any(re.search(r'hapus|dihapus|wipe', row.get('action', ''), re.I)
-                    for row in result['actions'] if 'skenario' not in row.get('action', '')
-                    and 'langkah' not in row.get('action', '')),
-                'Agent reported executing the destructive action, not only queuing it')
+        generations = database_generations()
+        h.artifact('round-'+str(repetition+1)+'-before-database-generations.json', generations)
+        availability_error = None
+        try:
+            result = practice(h, 'wipe-node', repetition+1)
+        except Failure as error:
+            observation = json.loads((h.folder/('round-'+str(repetition+1)+'-observation.json')).read_text())
+            if not observation.get('application_recovered'):
+                raise
+            availability_error = str(error)
+            result = {'lost_nodes': observation.get('lost_nodes', [])}
+        recovered_generations = database_generations()
+        h.artifact('round-'+str(repetition+1)+'-database-generations.json',
+                   {'before': generations, 'after': recovered_generations, 'lost_nodes': result['lost_nodes']})
+        reinitialized = bool(result['lost_nodes']) and generations != recovered_generations
         after = identities(h, 'round-'+str(repetition+1)+'-after')
         missing = sorted(before-after)
         h.artifact('round-'+str(repetition+1)+'-missing.json', missing)
         h.check(not missing, 'Every baseline non-retractable canonical identity survived the official wipe')
+        h.wait(lambda: physical_copies('round-'+str(repetition+1)+'-after'),
+               'Autonomous recovery restores two physical copies of every baseline identity')
         h.note({'round': repetition+1, 'baseline_identities': len(before), 'after_identities': len(after),
-                'missing': len(missing), 'backup_restored_during_observation': False})
+                'missing': len(missing), 'backup_restored_during_observation': False,
+                'availability_error': availability_error, 'physical_cluster_reinitialized': reinitialized})
+        h.check(reinitialized,
+                'Physical PostgreSQL reinitialization is independently established; a reboot alone is insufficient destructive-loss proof')
+        h.check(availability_error is None, 'Data preservation does not hide any failure in the continuous wipe observation')
 
 
 if __name__ == '__main__':

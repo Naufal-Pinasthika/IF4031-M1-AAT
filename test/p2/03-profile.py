@@ -23,11 +23,12 @@ def scenario(h):
     try:
         for app, flag in [('aggregator', 'AGGREGATOR_PROFILE_ENABLED'),
                           ('aggregator-gateway', 'GATEWAY_PROFILE_ENABLED')]:
-            deployment = json.loads(h.kube('get', 'deployment/'+app, '-o', 'json'))
+            workload = ('daemonset/' if app == 'aggregator-gateway' else 'deployment/') + app
+            deployment = json.loads(h.kube('get', workload, '-o', 'json'))
             container = deployment['spec']['template']['spec']['containers'][0]
             original[app] = (flag, container['name'], next((e for e in container.get('env', []) if e['name'] == flag), None))
-            h.kube('set', 'env', 'deployment/'+app, flag+'=1')
-            h.kube('rollout', 'status', 'deployment/'+app, '--timeout=180s')
+            h.kube('set', 'env', workload, flag+'=1')
+            h.kube('rollout', 'status', workload, '--timeout=180s')
         pods = {p['name']: p for p in h.pods().values() if p['app'] in original and p['ready']}
         h.artifact('profile-pods.json', pods)
 
@@ -52,11 +53,12 @@ def scenario(h):
     finally:
         pool.shutdown(wait=True)
         for app, (flag, container, entry) in original.items():
-            h.kube('set', 'env', 'deployment/'+app, flag+'-')
+            workload = ('daemonset/' if app == 'aggregator-gateway' else 'deployment/') + app
+            h.kube('set', 'env', workload, flag+'-')
             if entry is not None:
                 patch = {'spec': {'template': {'spec': {'containers': [{'name': container, 'env': [entry]}]}}}}
-                h.kube('patch', 'deployment/'+app, '--type=strategic', '-p', json.dumps(patch))
-            h.kube('rollout', 'status', 'deployment/'+app, '--timeout=180s')
+                h.kube('patch', workload, '--type=strategic', '-p', json.dumps(patch))
+            h.kube('rollout', 'status', workload, '--timeout=180s')
 
 
 if __name__ == '__main__':

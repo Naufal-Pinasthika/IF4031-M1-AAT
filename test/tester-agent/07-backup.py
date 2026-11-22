@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -30,7 +31,7 @@ def scenario(h):
     remote_folder = '.local/state/aat-backups/'+h.run_id
     free = int(h.hosts.ssh(destination, 'python3 -c '+shlex.quote('import pathlib,shutil;print(shutil.disk_usage(pathlib.Path.home()).free)'), capture=True))
     h.check(free >= 8*1024**3, 'External backup host has at least 8 GiB headroom')
-    resources = json.loads(h.kube('get', 'deployments,statefulsets,services,configmaps,secrets,pvc,networkpolicies', '-o', 'json'))
+    resources = json.loads(h.kube('get', 'deployments,daemonsets,statefulsets,services,configmaps,secrets,pvc,networkpolicies', '-o', 'json'))
     h.artifact('private-resources.json', resources)
     claims = json.loads(h.kube('get', 'pvc', '-o', 'json'))['items']
     volumes = json.loads(h.kube('get', 'pv', '-o', 'json'))['items']
@@ -84,16 +85,28 @@ def scenario(h):
             h.check(bool(cluster.get('status', {}).get('currentPrimary')), 'Staged database has a primary before backup: '+name)
             databases.append((cluster['status']['currentPrimary'], 'postgres', database))
     for pod, user, database in databases:
-        base = ['sudo', '-n', 'k3s', 'kubectl', '-n', NS, 'exec', '-i', pod, '--']
-        archive = capture(pod+'.dump', shlex.join(base+['pg_dump', '-U', user, '-d', database, '-Fc']))
+        observed = json.loads(h.kube('get', 'pod', pod, '-o', 'json'))
+        node = next(n for n in h.hosts.nodes if n['name'] == observed['spec']['nodeName'])
+        statuses = observed['status']['containerStatuses']
+        candidates = [c for c in statuses if c['name'] in ('postgres', 'auth-postgres')]
+        h.check(len(candidates) == 1, 'Exactly one PostgreSQL container is identified: '+pod)
+        container = candidates[0]
+        h.check(container['ready'] and container['containerID'].startswith('containerd://'),
+                'Backup targets the observed Ready PostgreSQL container: '+pod)
+        container_id = container['containerID'].split('://', 1)[1]
+        h.check(bool(re.fullmatch('[0-9a-f]{64}', container_id)), 'Container ID is an exact runtime identity')
+        # Stream through the owning node's local CRI, avoiding long dump data
+        # traversing the API server/kubelet WebSocket proxy. Do not stop PG.
+        base = ['sudo', '-n', 'k3s', 'crictl', 'exec', '-i', container_id]
+        archive = capture(pod+'.dump', shlex.join(base+['pg_dump', '-U', user, '-d', database, '-Fc']), node=node)
         prefix = h.hosts.ssh(destination, 'head -c 1048576 ~/'+remote_folder+'/'+pod+'.dump', capture=True)
         h.check(prefix[:5] == b'PGDMP', 'PostgreSQL custom archive header is valid: '+pod)
         check = 'file=$(mktemp /dev/shm/aat-backup-check.XXXXXX); trap \'rm -f "$file"\' EXIT; ' \
             'head -c '+str(len(prefix))+' > "$file"; pg_restore --list "$file"'
-        catalogue = subprocess.run(h.hosts.command(h.server, shlex.join(base+['sh', '-ec', check])),
+        catalogue = subprocess.run(h.hosts.command(node, shlex.join(base+['sh', '-ec', check])),
             input=prefix, capture_output=True, check=True, timeout=30).stdout
         upload(pod+'.catalogue', catalogue)
-        capture(pod+'.globals.sql', shlex.join(base+['pg_dumpall', '-U', user, '--globals-only']))
+        capture(pod+'.globals.sql', shlex.join(base+['pg_dumpall', '-U', user, '--globals-only']), node=node)
         h.note({'backup_database': pod, 'bytes': archive['bytes']})
     for app in ('kafka', 'dashboard-consumer', 'notifier-consumer'):
         workload = json.loads(h.kube('get', 'statefulset', app, '-o', 'json'))

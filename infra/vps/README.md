@@ -31,6 +31,23 @@ archives contain sensitive cluster metadata and must remain outside Git and
 outside load-job directories. Provisioning alone is not a P2 acceptance pass.
 
 For script selection and side effects, see the [script catalog](SCRIPTS.md).
+
+The Aggregator front door is a per-node gateway DaemonSet. Its NodePort and
+internal `aggregator` Service use `trafficDistribution: PreferSameNode` with
+Cluster traffic policies; Client API reaches this Service before L7 backend
+selection. This requires Kubernetes supporting PreferSameNode (verified on
+the VPS k3s v1.37 cluster). Every participating application node should have a Ready
+gateway. `GATEWAY_REPLICAS=3` divides the backend budget for this three-node lab;
+adjust that startup value when changing the gateway node count. Locality is a
+preference, allowing remote endpoints when the local gateway is absent, not a
+claim of control-plane or whole-node HA.
+
+Host-originated NodePort traffic is a Kubernetes exception to strict Local
+external policies. The selected topology hints also prefer the local endpoint
+on that path, unlike externalTrafficPolicy alone. Use `--ingress-vps` on
+report tests to observe the same NodePorts from the separate inventory generator.
+Keep both paths' evidence separately; an external-ingress pass alone does not
+prove that the SSH/host-originated path survived.
 For the restored source versus live-runtime boundary, see the
 [status page](../../docs/status/README.md). Documentation cleanup does not
 redeploy the VPSs; inspect schema compatibility before rolling back binaries.
@@ -61,13 +78,16 @@ NodePorts are restricted to `10.77.0.0/24` by kube-proxy on **every** node.
 The official Tester Agent manifest/image/RBAC is applied unchanged.
 
 Ubuntu's absolute `/usr/sbin/iptables` alternatives symlink escapes the Agent's
-`/host` bind mount during binary discovery. The `tester-tools` provisioning step
-replaces only that symlink with a relative link to the **same selected distro
-binary**. It verifies unchanged version/filter rules and saves the original link
-in `/etc/aat-vps/iptables-link-before-tester.json`. It neither flushes firewall
-rules nor changes the Agent. Re-run this step after package/alternatives changes
-before a practice campaign; an Agent step marked successful is still not proof
-that a network fault actually took effect.
+`/host` bind mount. A relative link alone is insufficient: the dynamically linked
+distro binary also needs an interpreter absent from the Agent container.
+After k3s installation, `tester-tools` installs k3s's bundled static xtables
+binary under `/usr/local/libexec/` and uses a relative iptables link. It verifies
+the same kernel firewall backend and unchanged filter rules; the userspace
+version can change. The original executable selection is saved privately in
+`/etc/aat-vps/iptables-exec-before-tester.json`. No rules are flushed and the
+Agent is unchanged. Preflight executes `/host/usr/sbin/iptables --version`
+inside every original Agent. Re-run this step after package/alternatives changes;
+an Agent step marked successful is still not proof of a real network fault.
 
 This is **not full HA**: control plane, Kafka and coordination database remain
 singletons on A. The intended worker-failure tests do not establish A-failure

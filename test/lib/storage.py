@@ -23,7 +23,7 @@ class StorageSandbox(Sandbox):
             h = self.h
             backend = self.resource('Service', self.name + '-backends', spec={'clusterIP': 'None',
                 'selector': {'app': self.name + '-agg'}, 'ports': [{'port': 8083, 'targetPort': 8083}]})
-            images = json.loads(h.kube('get', 'deployment', 'aggregator-gateway', '-o', 'json'))
+            images = json.loads(h.kube('get', 'daemonset', 'aggregator-gateway', '-o', 'json'))
             image = images['spec']['template']['spec']['containers'][0]['image']
             gateway, service = self.deployment(self.name + '-gateway', 'api', image, 8083,
                 [{'name': 'AGGREGATOR_BACKEND_DNS', 'value': self.name + '-backends.' + NS + '.svc.cluster.local'},

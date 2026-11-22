@@ -3,6 +3,274 @@
 Snapshot: 22 November 2026 (WIB). Results below distinguish repeated practice
 E2E evidence from historical results and the later assistant/exam comparison.
 
+## Read-path resilience candidate, 22 November
+
+The current VPS candidate uses Aggregator/gateway image
+`m2-read-resilience-20261122-r3` and Client API image
+`m2-read-resilience-20261122-r1`. This is an uncommitted candidate, not a
+blanket Tester Agent or P5 pass. Original Agent/Sensor images and application
+volumes were not replaced by this scoped rollout.
+
+Readiness now probes storage units concurrently. Safe bodyless reads can try
+up to three gateway backends on pre-header transport failures, bounded by the
+caller context; writes and application responses are not replayed. An
+independent storage probe distinguishes query pressure from unavailable
+partitions. Reachable-but-busy replicas still reject; unreachable partitions
+produce an explicitly partial union retaining healthy results.
+
+The front door now has one gateway per node, `PreferSameNode` routing with
+Cluster traffic policies, and a locality-aware Client API upstream. The legacy
+gateway Deployment was removed only after the DaemonSet was Ready. Backend budgets remain bounded
+and are divided across the three gateways.
+
+All Aggregator and Client API Go package tests passed locally. The new
+busy/unavailable and concurrent-readiness regressions plus three negative
+fencing regressions each passed three times, without skips, in a run-owned
+disposable VPS PostgreSQL database. The disposable database and test binary
+were then removed; application databases were not altered by that run.
+Earlier runs used private schemas in the existing coordinator database and
+cleaned them afterward; a first invocation naming a nonexistent database
+failed. Those logs are retained separately, not presented as successful
+disposable-database runs.
+
+R1 real partition evidence remains failed:
+`tester-agent/06-partition/20261122T061249Z-c40b9653` had a 20-second
+host-originated NodePort transport timeout. An external-ingress retest after
+the gateway topology change, before the R2 storage fix, also failed:
+`tester-agent/06-partition/20261122T062125Z-bc8ebc03` recorded 14 invalid
+reads, including storage-busy responses. These failures are not erased.
+
+R2 passed three official partition rounds under
+`tester-agent/06-partition/20261122T063347Z-015ec4a8`: 296 valid HTTP 200
+reads, zero invalid reads, with independent firewall/connectivity loss and
+automatic application recovery checks. This campaign used strict Local
+Service policies and the external inventory generator as ingress origin.
+It is not by itself proof for host-originated NodePort traffic.
+
+The subsequent routing refinement uses `PreferSameNode`, verified against
+actual EndpointSlice node hints and the installed node's iptables rules. Unlike
+strict external Local policy alone, the preferred endpoint applies to the
+host-originated path too, while allowing remote fallback when local endpoints
+are absent. The separate three-round official partition campaign also passed
+on the unchanged SSH/host-originated test path:
+`tester-agent/06-partition/20261122T063915Z-deda7572`, with 278 HTTP 200
+reads, zero invalid reads, and automatic recovery in every round. Maximum
+observed read times were 4.754 seconds for the earlier external campaign and
+4.115 seconds for this host-originated campaign; these are read timings, not
+critical-alert delivery measurements. Earlier failures are retained.
+Rendered application manifests also passed Kubernetes server-side dry-run with
+the deployed `local-path` StorageClass explicitly selected; no unrelated images
+or storage claims were applied during that validation.
+
+The corrected isolated fencing campaign passed:
+`tester-agent/12-fencing/20261122T064404Z-15aea7a0`. It observed three real
+30-second polling-process freezes, three +45/-30 second worker-clock rounds
+(400 samples each), no overlapping completed owners and no stale admissions.
+Audit identity equality, upstream poll uniqueness and negative database fencing
+regressions passed. The continuous observer recorded 261 valid Field reads;
+294 additional step-level reads were also valid. Their maximum observed times
+were 0.909 and 0.915 seconds respectively. The fixture now mirrors the real
+gateway path. This proves process-level behavior, not whole-VM suspend/resume.
+
+Combined partition and priority load still **failed**:
+`tester-agent/13-partition-load/20261122T064930Z-a542b76d`. Of 1,201 Field
+attempts, 368 returned HTTP 200 with explicit partial data and four returned
+HTTP 503 (one backend timeout, three no-ready-backend). Six ordinary observer
+reads received HTTP 429. There were zero dropped Field iterations. The original
+complete-response/error thresholds remain unchanged; partial responses and
+actual transport/backend failures are reported separately. Neither the
+successful no-load partitions nor fencing override this failure.
+
+An additional shared-projection bulkhead now bounds optional cache
+lookup/publication I/O separately from canonical reads. Seven projection
+regressions each passed three times without skips on a disposable VPS database;
+blocked lookup/publication retained canonical results in 30-40 ms. R3 rolled
+this change out to all three Aggregators and per-node gateways, retaining every
+PVC identity and leaving Client API, Agent and Sensor images unchanged. This
+rollout alone is not credited as fixing the combined E2E failure.
+
+The first R3 combined attempt stopped before submitting a fault because fresh,
+quiet gateways had no initial log row for the evidence collector. The collector
+now issues a harmless version read to each gateway before attaching its log
+stream. Workload parameters, response assertions and thresholds are unchanged;
+the failed preparation remains recorded under
+`tester-agent/13-partition-load/20261122T071937Z-bb98cbb5`.
+
+The first completed R3 combined campaign,
+`tester-agent/13-partition-load/20261122T072103Z-ce065780`, retained its
+**failed** status under the original assertions. All 1,201 Field business
+requests were HTTP 200: 830 complete and 371 explicitly partial; no Field
+503, transport failure or dropped iteration was recorded. The independent
+observer saw 46 Field HTTP 200 responses, 38 ordinary Aggregator HTTP 200
+responses and eight ordinary Aggregator HTTP 429 responses. The Agent cleaned
+up and the application recovered without manual intervention. Media received
+636,579 controlled rejections. A partial page still fails the load script's
+complete-page assertion; ordinary overload rejections still fail the practice
+observer's all-200 assertion. These outcomes are not silently relabelled passes,
+nor does this campaign prove critical-alert delivery.
+
+Two further R3 rounds completed under
+`tester-agent/13-partition-load/20261122T072324Z-9df46390`, also **failed**
+under unchanged assertions. Across all three completed R3 rounds:
+
+| Observation | Round 1 | Round 2 | Round 3 |
+| --- | --- | --- | --- |
+| Field business attempts | 1,201 | 1,201 | 1,201 |
+| Field HTTP 200, explicitly partial | 371 | 359 | 339 |
+| Field HTTP 429 | 0 | 0 | 1 |
+| Field HTTP 503 / transport failures | 0 | 0 | 0 |
+| Dropped Field iterations | 0 | 0 | 0 |
+| Controlled Media rejections | 636,579 | 672,453 | 679,325 |
+| Ordinary observer HTTP 429 | 8 | 7 | 6 |
+| Automatic application recovery / Agent cleanup | yes | yes | yes |
+
+The third round's real Field rejection is distinct from explicit partial data:
+`p5-1-FIELD-143-11` returned `gateway_queue_busy` in 132.745 ms. Its correlated
+gateway log shows 101.066 ms before rejection, matching the bounded gateway
+queue wait. This admission gap remains unresolved; the shared-projection fix
+must not be presented as a complete overload fix. The 290 independent observer
+reads had no 5xx or transport failure; maximum observed duration was 0.992 s.
+Partial responses are counted separately from complete responses, not rewritten.
+
+The final snapshot found three Ready Aggregators, three Ready gateways, Client
+API and notifier Ready, and no pending Agent practice request. Sensor Pantai
+remained NotReady/CrashLoopBackOff as before this campaign. No configuration,
+restart, data restore or repair was performed inside the fault windows.
+Candidate-specific snapshots and logs remain under
+`.e2e/read-fix-local-ingress/`; this does not establish all P5 criteria.
+
+A fresh off-cluster backup attempt before the next authorized wipe failed on a
+PostgreSQL `kubectl exec` WebSocket disconnect. No destruction was submitted.
+Backup streaming now targets the observed Ready container through its owning
+node's local CRI, retaining logical `pg_dump` and checksum validation. The first
+new-run attempt found a missing Python import before dumps started; both failed
+runs are retained. A further attempt corrected an Auth database container-name
+assumption. The successful fresh backup is
+`tester-agent/07-backup/20261122T065732Z-5fbe56a0`: 26 files,
+678,384,036 bytes, stored on the external generator. An authorized official
+wipe campaign ran under
+`tester-agent/08-wipe-node/20261122T070147Z-e2e46777`; its guard revalidates
+full checksums and PVC identities before fault submission. No incomplete
+backup is accepted by that guard. Human Start after a confirmed node shutdown
+remains planned reintroduction, not automatic provider power-on.
+
+The official Agent's live log recorded the wipe and shutdown of worker C.
+After the operator started C, its PostgreSQL initialized a new physical cluster;
+the system identifier differs from the last retained pre-campaign observation.
+No backup restore or manual application-data copy was performed. Independent
+physical checks then found all 553,167 baseline identities and at least two
+copies of each. The separate read-only Audit comparison passed all 565 complete
+pages with zero missing identities:
+`tester-agent/10-audit-recovery/20261122T071145Z-e344ff8f`.
+
+The original foreground wipe observer was interrupted before writing its final
+report. Its continuous availability window is therefore **inconclusive**, not
+passed. Post-recovery data equality does not fill that gap. Physical evidence
+is retained under `.e2e/read-fix-local-ingress/wipe-post-interruption/`.
+The runner now persists database generations before submitting the fault, so
+an interrupted future campaign retains its own pre-fault generation baseline.
+
+## Tester Agent retest: real faults, not action-log-only passes
+
+The 22 November retest used the unchanged official Agent and production images.
+Three rounds each of kill-leader, schema, kill-store and actual polling-owner
+crash passed. BMKG/PVMBG takeover after the owner crash was 3.426–8.314 seconds.
+Three official clock-skew rounds also passed independent realtime/monotonic
+observation and recovery checks. These practice checks are not a blanket P2/P5
+or sustained-skew/fencing pass.
+
+The earlier relative iptables-link fix was insufficient: the distro binary's
+ELF interpreter was absent inside the Agent. Provisioning now uses the installed
+k3s static xtables executable with the same kernel backend and unchanged rules.
+Preflight executes it inside every original Agent. The first resulting **real
+partition failed**: four observer samples were invalid, including HTTP 503s.
+The API recovered after cleanup; recovery does not erase the outage.
+
+A simultaneous official partition and 120-second configured priority workload
+also **failed**. It recorded seven invalid observer reads and 350/1,201 Field
+attempts failing the unchanged complete-response requirement (including explicit
+partial pages). There were zero dropped Field iterations. This does not prove
+critical-alert delivery under combined faults. Observed logs show established
+gateway connections timing out, an unsuccessful subsequent Client API transport
+retry, and a no-ready-backend rejection. No application fix is claimed yet.
+
+New process-freeze/sustained-skew testing was verified separately. Initial
+failed runs exposed stale database sessions from absent pre-wipe pods and a SQL
+error in the new evidence collector. Those failures are retained. Forty-three
+verified orphaned **idle** sessions were retired between fault windows; the
+run-owned canonical pools are bounded without increasing production capacity.
+Three real 30-second freezes in the subsequent run observed takeover before
+resume and no stale-epoch admission; that run then stopped on the collector SQL
+error after its first sustained-skew window. Do not label the entire case passed.
+The corrected run, `tester-agent/12-fencing/20261122T054425Z-8a7f22dc`, completed
+three planned 30-second process freezes plus one worker-handoff freeze, with no
+stale admissions after takeover. Three sustained-skew rounds each recorded 400
+samples across +45/-30 seconds and no overlapping completed owners. The isolated
+Audit identity check and upstream poll-endpoint uniqueness checks passed. Three
+service-local negative fencing regressions each passed three times without skips.
+Nevertheless the **whole case failed**: one of 306 Field reads returned HTTP 503
+in 4.405 seconds. Ownership safety is not uninterrupted read availability.
+Whole-node/VM freeze is separate: the operator reports that provider Pause/Resume
+is unavailable or inactive. A stopped-and-rebooted VM is not a substitute for
+resuming the old process. The process-freeze evidence must not be presented as
+complete P2.5 proof.
+
+Private evidence:
+
+- `tester-agent/01-kill-leader/20261122T051431Z-bf45122d`
+- `tester-agent/02-polling-failover/20261122T051213Z-e1fd5dc8`
+- `tester-agent/03-schema/20261122T051545Z-fb7c6dfc`
+- `tester-agent/04-kill-store/20261122T051701Z-65453a44`
+- `tester-agent/05-clock-skew/20261122T052343Z-b928dd83`
+- `tester-agent/06-partition/20261122T052718Z-f9de5451`
+- `tester-agent/12-fencing/20261122T053528Z-8b209e96`
+- `tester-agent/13-partition-load/20261122T053850Z-b5288274`
+
+The production Sensor Pantai still crash-loops. Staged coordinator-ha-1 and
+notifier-ha-2 still fail because their node-local PostgreSQL data directory is
+missing after the previous wipe. Production has not been switched to those
+staged clusters. Neither their rebuild nor Sensor recovery is implied by the
+successful practice cases above.
+
+A new off-cluster backup completed before any new destructive test: 26 files,
+669,715,282 bytes. All full-file SHA-256 checks and PVC identities were verified
+again by `tester-agent/backup-verification/20261122T054448Z-ce219a7e`.
+The private manifest is under
+`tester-agent/07-backup/20261122T054048Z-b6cab222`. Backup maintenance was outside
+fault observation windows; it is not evidence of automatic recovery.
+
+The subsequent authorized wipe campaign is
+`tester-agent/08-wipe-node/20261122T055010Z-25f0054d`. Its pre-fault Audit found
+553,167 non-SATELIT identities and independently verified at least two physical
+copies of every identity. The official scenario took C offline. The runner
+retired only its exact persisted request (`80fb8cbe2816`) before planned
+reintroduction; a separate read confirmed the queue entry was absent. The
+operator pressed Start; all three nodes and canonical PostgreSQL pods returned
+Ready without restoring the backup. Across 265.451 seconds the observer recorded
+440 valid HTTP 200 reads, including 412 explicitly partial pages, with maximum
+response time 590.556 ms. This proves the measured read availability across the
+shutdown/reboot, not that all reads contained complete data.
+
+The destructive-loss assertion **failed**: every PostgreSQL system identifier
+was unchanged, and C logged startup of its existing cluster with WAL crash
+recovery rather than initdb. The retained Agent polling log only captured the
+scenario start before C went offline. Full physical database erasure is therefore
+not independently established; reboot survival must not be called a destructive
+database-rebuild pass. No additional wipe was submitted to force a desired result.
+
+A direct postboot comparison independently found all 553,167 baseline identities,
+zero missing identities and zero identities with fewer than two physical copies
+(`.e2e/tester-postboot-physical-20261122T055906Z`). The first full-Audit follow-up
+failed on an explicitly partial page: store-c prefix queries exceeded their
+unchanged 500-ms deadlines. Its evidence is
+`tester-agent/10-audit-recovery/20261122T055657Z-508b031b`. Later eventual-completeness
+checks do not erase this initial failure or establish actual disk-loss recovery.
+The later settled-state Audit comparison passed 565 complete pages, retaining all
+553,167 baseline identities with zero missing
+(`tester-agent/10-audit-recovery/20261122T055917Z-f623afaf`). It overlapped the
+read-only physical verification initially; it is eventual completeness evidence,
+not an idle capacity benchmark or a replacement for the failed earlier run.
+
 ## Latest P2 external-generator update
 
 A separate 8-vCPU / approximately 8-GB VPS now runs k6 1.4.2 outside Kubernetes.

@@ -9,7 +9,7 @@ import urllib.parse
 lock = threading.Condition()
 state = {'events': [], 'reports': [], 'raw': None, 'mode': 'legacy', 'cut_every': 0,
          'connections': [], 'ended_at': None, 'delay': .001, 'generation': 0,
-         'started_at': 0, 'prefix': 0}
+         'started_at': 0, 'prefix': 0, 'data_requests': []}
 token = os.environ['SOURCE_TOKEN']
 
 
@@ -78,6 +78,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.respond(200, {'status': 'ok'})
         if self.headers.get('Authorization') != 'Bearer ' + token and path.path not in ('/seismic-events', '/tsunami-warnings'):
             return self.respond(401, {'error': 'unauthorized'})
+        if path.path in ('/seismic-events', '/tsunami-warnings', '/volcanic-reports'):
+            with lock:
+                state['data_requests'].append({'path': path.path, 'correlation_id': self.headers.get('X-Correlation-ID'),
+                    'holder': self.headers.get('X-Poll-Holder'), 'epoch': self.headers.get('X-Poll-Epoch'),
+                    'poll_id': self.headers.get('X-Poll-ID'), 'received_at': time.time()})
+                state['data_requests'] = state['data_requests'][-5000:]
         if path.path in ('/v1/session', '/admin/status'):
             with lock:
                 now = time.time()
@@ -86,7 +92,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result = {'profile': 'controlled-e2e', 'speed': 60, 'latest_offset': available - 1,
                           'ended_at': state['ended_at'] if state['ended_at'] is not None and now >= state['ended_at'] else None,
                           'observed_at': now, 'burst_started_at': state['started_at'], 'prefix': state['prefix'],
-                          'interval_seconds': state['delay'], 'connections': list(state['connections'])}
+                          'interval_seconds': state['delay'], 'connections': list(state['connections']),
+                          'data_requests': list(state['data_requests'])}
             return self.respond(200, result)
         if path.path == '/volcanic-reports':
             with lock:

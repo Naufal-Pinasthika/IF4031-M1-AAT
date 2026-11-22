@@ -27,33 +27,51 @@ case "$1" in
     ufw allow in from 10.43.0.0/16
     ;;
   tester-tools)
-    # Absolute alternatives symlinks escape the Agent's /host bind mount.
-    # Retain the exact selected distro binary with a host-relative symlink.
+    # The unchanged Agent has no distro ELF loader. Use k3s' static binary
+    # with the same kernel backend; never flush, filter or rewrite its rules.
     python3 - <<'PY'
 import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
+import struct
 
 path = Path('/usr/sbin/iptables')
-selected = path.resolve(strict=True)
-assert selected.parent == Path('/usr/sbin') and selected.name in ('xtables-nft-multi', 'xtables-legacy-multi')
 before = subprocess.check_output([str(path), '-S'])
 version = subprocess.check_output([str(path), '--version'])
-if path.is_symlink() and os.readlink(path).startswith('/'):
-    backup = Path('/etc/aat-vps/iptables-link-before-tester.json')
-    backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if not backup.exists():
-        with backup.open('x') as output:
-            json.dump({'path': str(path), 'link': os.readlink(path), 'resolved': str(selected)}, output)
-        backup.chmod(0o600)
-    temporary = path.with_name('iptables.aat-tester-link')
-    temporary.symlink_to(os.path.relpath(selected, path.parent))
+backend = 'nft' if b'(nf_tables)' in version else 'legacy' if b'(legacy)' in version else None
+assert backend, version
+source = Path('/var/lib/rancher/k3s/data/current/bin/aux/xtables-'+backend+'-multi').resolve(strict=True)
+assert source.is_relative_to('/var/lib/rancher/k3s/data')
+data = source.read_bytes()
+assert data[:6] == b'\x7fELF\x02\x01', 'Expected static x86-64 ELF from the installed k3s release'
+offset, = struct.unpack_from('<Q', data, 32)
+entry, count = struct.unpack_from('<HH', data, 54)
+assert all(struct.unpack_from('<I', data, offset+i*entry)[0] != 3 for i in range(count)), 'ELF interpreter is not available inside the Agent'
+original = os.readlink(path) if path.is_symlink() else None
+assert original is not None, 'Refuse overwriting an unrecognized regular host executable'
+backup = Path('/etc/aat-vps/iptables-exec-before-tester.json')
+backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+if not backup.exists():
+    with backup.open('x') as output:
+        json.dump({'path': str(path), 'link': original, 'resolved': str(path.resolve()), 'version': version.decode().strip()}, output)
+    backup.chmod(0o600)
+target = Path('/usr/local/libexec/aat-xtables-'+backend+'-multi')
+target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+shutil.copyfile(source, target)
+target.chmod(0o755)
+temporary = path.with_name('iptables.aat-tester-link')
+temporary.symlink_to(os.path.relpath(target, path.parent))
+temporary.replace(path)
+try:
+    assert (b'(nf_tables)' in subprocess.check_output([str(path), '--version'])) == (backend == 'nft')
+    assert subprocess.check_output([str(path), '-S']) == before
+except BaseException:
+    temporary.symlink_to(original)
     temporary.replace(path)
-assert path.resolve(strict=True) == selected
-assert subprocess.check_output([str(path), '--version']) == version
-assert subprocess.check_output([str(path), '-S']) == before
-print('Host-relative iptables link verified; selected binary and firewall rules unchanged')
+    raise
+print('Static k3s iptables is executable through /host; kernel backend and filter rules retained')
 PY
     ;;
   network)
