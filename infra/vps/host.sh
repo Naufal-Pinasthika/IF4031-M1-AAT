@@ -92,6 +92,8 @@ PY
     fi
     systemctl enable --now wg-quick@aatwg0
     ufw --force enable
+    # Persist the firewall across node reboots, not only this SSH session.
+    systemctl enable --now ufw.service
     ;;
   k3s)
     version="$2"; role="$3"
